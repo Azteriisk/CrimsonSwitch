@@ -15,26 +15,6 @@ HWND EarlyUnlockHook::s_gameWindow = nullptr;
 HANDLE EarlyUnlockHook::s_hMonitorThread = nullptr;
 bool EarlyUnlockHook::s_stopRequested = false;
 
-// Function prototype for FindCompanionById (RVA 0xa7d7f0)
-typedef void* (__fastcall *tFindCompanionById)(void* pContainer, uint32_t charId, uint8_t flag);
-static tFindCompanionById oFindCompanionById = nullptr;
-
-static void* __fastcall Hook_FindCompanionById(void* pContainer, uint32_t charId, uint8_t flag) {
-    void* res = nullptr;
-    if (oFindCompanionById) {
-        res = oFindCompanionById(pContainer, charId, flag);
-    }
-    if (!res && (charId == 2 || charId == 3) && pContainer != nullptr) {
-        uintptr_t fnActivateAddr = SwitchManager::Instance().GetSelectOrActivateFunction();
-        if (fnActivateAddr) {
-            auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(fnActivateAddr);
-            res = fnActivate(pContainer, charId);
-            Logger::Log("[EarlyUnlockHook] Detour: Auto-registered Mercenary ID %u (0x%p) via FindCompanionById query\n", charId, res);
-        }
-    }
-    return res;
-}
-
 LRESULT CALLBACK EarlyUnlockHook::Hook_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && !(lParam & (1 << 30))) {
         const auto& cfg = Config::Get();
@@ -78,9 +58,11 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
     Logger::Log("[EarlyUnlockHook] State monitor thread started.\n");
 
     auto lastHotkeyTime = std::chrono::steady_clock::now();
+    auto lastUnlockTime = std::chrono::steady_clock::now();
 
     while (!s_stopRequested) {
         const auto& cfg = Config::Get();
+        auto now = std::chrono::steady_clock::now();
 
         // 1. Maintain active game window subclassing (handles window destruction across splash / main menu)
         if (!IsWindow(s_gameWindow)) {
@@ -100,14 +82,17 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
             }
         }
 
-        // 2. Maintain unlocked bitmask and populate companion container
+        // 2. Maintain unlocked bitmask and populate companion container once per second
         if (cfg.unlockAllFromStart) {
-            SwitchManager::Instance().ForceUnlockAll();
+            auto unlockElapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUnlockTime).count();
+            if (unlockElapsed >= 1000) {
+                lastUnlockTime = now;
+                SwitchManager::Instance().ForceUnlockAll();
+            }
         }
 
         // 3. High-reliability asynchronous hotkey polling with 250ms debouncing
         if (cfg.enableDirectHotkeys) {
-            auto now = std::chrono::steady_clock::now();
             auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHotkeyTime).count();
 
             if (elapsedMs >= 250) {
@@ -164,30 +149,17 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
 bool EarlyUnlockHook::Install() {
     if (s_isInstalled) return true;
 
-    Logger::Log("[EarlyUnlockHook] Installing CrimsonSwitch hooks...\n");
+    Logger::Log("[EarlyUnlockHook] Installing CrimsonSwitch...\n");
 
     // 1. Initialize SwitchManager
     SwitchManager::Instance().Initialize();
 
-    // 2. Initialize MinHook and hook FindCompanionById
-    if (MH_Initialize() == MH_OK || MH_Initialize() == MH_ERROR_ALREADY_INITIALIZED) {
-        uintptr_t fnFindAddr = SwitchManager::Instance().GetFindCompanionFunction();
-        if (fnFindAddr) {
-            if (MH_CreateHook(reinterpret_cast<LPVOID>(fnFindAddr),
-                              reinterpret_cast<LPVOID>(&Hook_FindCompanionById),
-                              reinterpret_cast<LPVOID*>(&oFindCompanionById)) == MH_OK) {
-                MH_EnableHook(reinterpret_cast<LPVOID>(fnFindAddr));
-                Logger::Log("[EarlyUnlockHook] Successfully installed detour on FindCompanionById (0x%p)!\n", (void*)fnFindAddr);
-            }
-        }
-    }
-
-    // 3. Launch background state & hotkey thread
+    // 2. Launch background state monitor & async hotkey thread
     s_stopRequested = false;
     s_hMonitorThread = CreateThread(nullptr, 0, MonitorThread, nullptr, 0, nullptr);
 
     s_isInstalled = true;
-    Logger::Log("[EarlyUnlockHook] Hooks installed successfully. All 3 Greymane heroes unlocked!\n");
+    Logger::Log("[EarlyUnlockHook] Initialized successfully. 3-Mercenary switching active!\n");
     return true;
 }
 
@@ -204,11 +176,6 @@ void EarlyUnlockHook::Remove() {
     if (s_gameWindow && s_originalWndProc) {
         SetWindowLongPtr(s_gameWindow, GWLP_WNDPROC, (LONG_PTR)s_originalWndProc);
         s_originalWndProc = nullptr;
-    }
-
-    uintptr_t fnFindAddr = SwitchManager::Instance().GetFindCompanionFunction();
-    if (fnFindAddr) {
-        MH_DisableHook(reinterpret_cast<LPVOID>(fnFindAddr));
     }
 
     s_isInstalled = false;

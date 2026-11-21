@@ -59,6 +59,7 @@ private:
     uintptr_t m_actorManagerGlobal{0};
     uintptr_t m_fnSelectOrActivateCompanion{0};
     uintptr_t m_fnFindCompanionById{0};
+    bool m_wheelPopulated{false};
     bool m_isMock{false};
     std::function<bool(CharacterType)> m_mockCoopArbitration{nullptr};
 };

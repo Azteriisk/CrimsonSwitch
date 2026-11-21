@@ -172,50 +172,67 @@ bool SwitchManager::ForceUnlockAll() {
         return true;
     }
 
+    // CRITICAL GUARD: Only run when the player is actually loaded in the game world!
+    // During splash screens, engine boot, and main menu, UserActor is null (0).
+    // Calling companion registration while outside the live world causes engine launch crashes.
+    uintptr_t userActor = GetUserActor();
+    if (userActor == 0) {
+        m_wheelPopulated = false; // Reset state when outside active game world
+        return false;
+    }
+
     bool updated = false;
 
     // 1. Bitmask unlock on UserActor
-    uintptr_t userActor = GetUserActor();
-    if (userActor != 0) {
-        __try {
-            uintptr_t maskAddr = userActor + BlackSpaceOffsets::USER_ACTOR_UNLOCKED_MASK;
-            if (!IsBadWritePtr(reinterpret_cast<void*>(maskAddr), sizeof(uint32_t))) {
-                uint32_t* pMask = reinterpret_cast<uint32_t*>(maskAddr);
-                if ((*pMask & ALL_MERCENARIES_UNLOCKED_MASK) != ALL_MERCENARIES_UNLOCKED_MASK) {
-                    *pMask |= ALL_MERCENARIES_UNLOCKED_MASK;
-                    m_status.unlockedMask = *pMask;
-                    Logger::Log("[SwitchManager] Unlocked Greymane bitmask to 0x%X on UserActor 0x%p!\n",
-                                *pMask, (void*)userActor);
-                    updated = true;
-                }
+    __try {
+        uintptr_t maskAddr = userActor + BlackSpaceOffsets::USER_ACTOR_UNLOCKED_MASK;
+        if (!IsBadWritePtr(reinterpret_cast<void*>(maskAddr), sizeof(uint32_t))) {
+            uint32_t* pMask = reinterpret_cast<uint32_t*>(maskAddr);
+            if ((*pMask & ALL_MERCENARIES_UNLOCKED_MASK) != ALL_MERCENARIES_UNLOCKED_MASK) {
+                *pMask |= ALL_MERCENARIES_UNLOCKED_MASK;
+                m_status.unlockedMask = *pMask;
+                Logger::Log("[SwitchManager] Unlocked Greymane bitmask to 0x%X on UserActor 0x%p!\n",
+                            *pMask, (void*)userActor);
+                updated = true;
             }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
 
     // 2. Add Damiane (2) and Oongka (3) to CompanionContainer so in-game radial wheel populates!
-    uintptr_t compContainer = GetCompanionContainer();
-    if (compContainer != 0 && m_fnSelectOrActivateCompanion != 0) {
-        __try {
-            uintptr_t countAddr = compContainer + 0x148;
-            if (!IsBadReadPtr(reinterpret_cast<const void*>(countAddr), sizeof(uint32_t))) {
-                uint32_t count = *reinterpret_cast<uint32_t*>(countAddr);
-                if (count < 3) {
-                    auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
-                    Logger::Log("[SwitchManager] Early game companion count (%u) < 3. Registering Damiane & Oongka into wheel...\n", count);
-                    fnActivate(reinterpret_cast<void*>(compContainer), 2); // Register Damiane
-                    fnActivate(reinterpret_cast<void*>(compContainer), 3); // Register Oongka
+    // CRITICAL CONDITIONS:
+    // - Player must be loaded in-world (userActor != 0 checked above)
+    // - Wheel not already populated in this session (!m_wheelPopulated)
+    // - Count must be >= 1 (Kliff is present in live world) AND < 3
+    if (!m_wheelPopulated && m_fnSelectOrActivateCompanion != 0) {
+        uintptr_t compContainer = GetCompanionContainer();
+        if (compContainer != 0) {
+            __try {
+                uintptr_t countAddr = compContainer + 0x148;
+                if (!IsBadReadPtr(reinterpret_cast<const void*>(countAddr), sizeof(uint32_t))) {
+                    uint32_t count = *reinterpret_cast<uint32_t*>(countAddr);
+                    if (count >= 1 && count < 3) {
+                        auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
+                        Logger::Log("[SwitchManager] In-game companion count (%u) < 3. Registering Damiane & Oongka into wheel...\n", count);
+                        fnActivate(reinterpret_cast<void*>(compContainer), 2); // Register Damiane
+                        fnActivate(reinterpret_cast<void*>(compContainer), 3); // Register Oongka
 
-                    // Re-activate current hero
-                    uint32_t activeCid = (m_status.activeCharacter == CharacterType::Damiane) ? 2 :
-                                         ((m_status.activeCharacter == CharacterType::Oongka) ? 3 : 1);
-                    fnActivate(reinterpret_cast<void*>(compContainer), activeCid);
+                        // Re-activate current hero
+                        uint32_t activeCid = (m_status.activeCharacter == CharacterType::Damiane) ? 2 :
+                                             ((m_status.activeCharacter == CharacterType::Oongka) ? 3 : 1);
+                        fnActivate(reinterpret_cast<void*>(compContainer), activeCid);
 
-                    uint32_t newCount = *reinterpret_cast<uint32_t*>(countAddr);
-                    Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka ready).\n", newCount);
-                    updated = true;
+                        uint32_t newCount = *reinterpret_cast<uint32_t*>(countAddr);
+                        Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka ready).\n", newCount);
+                        m_wheelPopulated = true;
+                        updated = true;
+                    } else if (count >= 3) {
+                        m_wheelPopulated = true;
+                    }
                 }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                Logger::Log("[SwitchManager] Exception guarded in CompanionContainer activation.\n");
             }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
     }
 
     return updated;
