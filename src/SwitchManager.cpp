@@ -77,20 +77,38 @@ bool SwitchManager::ForceUnlockAll() {
 
     if (!m_status.isInitialized || m_actorManagerGlobal == 0) return false;
 
-    uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
-    if (!mgr) return false;
+    __try {
+        if (IsBadReadPtr(reinterpret_cast<const void*>(m_actorManagerGlobal), sizeof(uintptr_t))) {
+            return false;
+        }
 
-    uintptr_t userActor = *reinterpret_cast<uintptr_t*>(mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR);
-    if (!userActor) return false;
+        uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
+        if (mgr < 0x10000 || mgr > 0x7FFFFFFFFFFF) return false;
 
-    // Force unlocked bitmask on UserActor
-    uint32_t* pMask = reinterpret_cast<uint32_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_UNLOCKED_MASK);
-    *pMask |= ALL_MERCENARIES_UNLOCKED_MASK;
-    m_status.unlockedMask = *pMask;
+        uintptr_t userActorAddr = mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(userActorAddr), sizeof(uintptr_t))) {
+            return false;
+        }
 
-    Logger::Log("[SwitchManager] Successfully forced character unlock bitmask to 0x%X on UserActor 0x%p!\n",
-                *pMask, (void*)userActor);
-    return true;
+        uintptr_t userActor = *reinterpret_cast<uintptr_t*>(userActorAddr);
+        if (userActor < 0x10000 || userActor > 0x7FFFFFFFFFFF) return false;
+
+        uintptr_t maskAddr = userActor + BlackSpaceOffsets::USER_ACTOR_UNLOCKED_MASK;
+        if (IsBadWritePtr(reinterpret_cast<void*>(maskAddr), sizeof(uint32_t))) {
+            return false;
+        }
+
+        uint32_t* pMask = reinterpret_cast<uint32_t*>(maskAddr);
+        if ((*pMask & ALL_MERCENARIES_UNLOCKED_MASK) != ALL_MERCENARIES_UNLOCKED_MASK) {
+            *pMask |= ALL_MERCENARIES_UNLOCKED_MASK;
+            m_status.unlockedMask = *pMask;
+            Logger::Log("[SwitchManager] Successfully forced character unlock bitmask to 0x%X on UserActor 0x%p!\n",
+                        *pMask, (void*)userActor);
+        }
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
 CharacterType SwitchManager::GetActiveCharacter() {
@@ -104,44 +122,62 @@ CharacterType SwitchManager::GetActiveCharacter() {
         return CharacterType::Kliff;
     }
 
-    uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
-    if (!mgr) return CharacterType::Kliff;
+    __try {
+        if (IsBadReadPtr(reinterpret_cast<const void*>(m_actorManagerGlobal), sizeof(uintptr_t))) {
+            return CharacterType::Kliff;
+        }
 
-    uintptr_t userActor = *reinterpret_cast<uintptr_t*>(mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR);
-    if (!userActor) return CharacterType::Kliff;
+        uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
+        if (mgr < 0x10000 || mgr > 0x7FFFFFFFFFFF) return CharacterType::Kliff;
 
-    uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR);
-    if (!subMgr) return CharacterType::Kliff;
+        uintptr_t userActorAddr = mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(userActorAddr), sizeof(uintptr_t))) {
+            return CharacterType::Kliff;
+        }
 
-    uintptr_t kliffCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
-    uintptr_t ctrlCcoia  = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA);
+        uintptr_t userActor = *reinterpret_cast<uintptr_t*>(userActorAddr);
+        if (userActor < 0x10000 || userActor > 0x7FFFFFFFFFFF) return CharacterType::Kliff;
 
-    if (ctrlCcoia == kliffCcoia || ctrlCcoia == 0) {
-        m_status.activeCharacter = CharacterType::Kliff;
-        return CharacterType::Kliff;
-    }
+        uintptr_t subMgrAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(subMgrAddr), sizeof(uintptr_t))) {
+            return CharacterType::Kliff;
+        }
 
-    // Inspect appearance path chain
-    uintptr_t compTable = *reinterpret_cast<uintptr_t*>(ctrlCcoia + 0x68);
-    if (compTable) {
-        uintptr_t p1 = *reinterpret_cast<uintptr_t*>(compTable + 0x40);
-        if (p1) {
-            uintptr_t p2 = *reinterpret_cast<uintptr_t*>(p1 + 0x40);
-            if (p2) {
-                const char* appPath = reinterpret_cast<const char*>(p2 + 0x38);
-                if (appPath) {
-                    std::string_view path(appPath);
-                    if (path.find(ProtagonistCodenames::DAMIANE) != std::string_view::npos) {
-                        m_status.activeCharacter = CharacterType::Damiane;
-                        return CharacterType::Damiane;
-                    }
-                    if (path.find(ProtagonistCodenames::OONGKA) != std::string_view::npos) {
-                        m_status.activeCharacter = CharacterType::Oongka;
-                        return CharacterType::Oongka;
+        uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(subMgrAddr);
+        if (subMgr < 0x10000 || subMgr > 0x7FFFFFFFFFFF) return CharacterType::Kliff;
+
+        uintptr_t kliffCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
+        uintptr_t ctrlCcoia  = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA);
+
+        if (ctrlCcoia == kliffCcoia || ctrlCcoia == 0) {
+            m_status.activeCharacter = CharacterType::Kliff;
+            return CharacterType::Kliff;
+        }
+
+        // Inspect appearance path chain
+        uintptr_t compTable = *reinterpret_cast<uintptr_t*>(ctrlCcoia + 0x68);
+        if (compTable && !IsBadReadPtr(reinterpret_cast<const void*>(compTable), sizeof(uintptr_t) * 9)) {
+            uintptr_t p1 = *reinterpret_cast<uintptr_t*>(compTable + 0x40);
+            if (p1 && !IsBadReadPtr(reinterpret_cast<const void*>(p1), sizeof(uintptr_t) * 9)) {
+                uintptr_t p2 = *reinterpret_cast<uintptr_t*>(p1 + 0x40);
+                if (p2 && !IsBadReadPtr(reinterpret_cast<const void*>(p2), sizeof(uintptr_t) * 8)) {
+                    const char* appPath = reinterpret_cast<const char*>(p2 + 0x38);
+                    if (appPath && !IsBadStringPtrA(appPath, 256)) {
+                        std::string_view path(appPath);
+                        if (path.find(ProtagonistCodenames::DAMIANE) != std::string_view::npos) {
+                            m_status.activeCharacter = CharacterType::Damiane;
+                            return CharacterType::Damiane;
+                        }
+                        if (path.find(ProtagonistCodenames::OONGKA) != std::string_view::npos) {
+                            m_status.activeCharacter = CharacterType::Oongka;
+                            return CharacterType::Oongka;
+                        }
                     }
                 }
             }
         }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return CharacterType::Kliff;
     }
 
     return m_status.activeCharacter;
