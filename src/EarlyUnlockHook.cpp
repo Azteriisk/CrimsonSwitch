@@ -5,6 +5,7 @@
 #include "PatternScan.hpp"
 #include <MinHook.h>
 #include <iostream>
+#include <chrono>
 
 namespace CrimsonSwitch {
 
@@ -18,7 +19,6 @@ typedef bool(WINAPI* tIsCharacterUnlocked)(void* pUserActor, uint32_t charId);
 static tIsCharacterUnlocked oIsCharacterUnlocked = nullptr;
 
 [[maybe_unused]] static bool WINAPI Hook_IsCharacterUnlocked(void* pUserActor, uint32_t charId) {
-    // If querying Kliff (1), Damiane (2), or Oongka (3), force unlock
     if (charId >= 1 && charId <= 3) {
         return true;
     }
@@ -34,26 +34,26 @@ LRESULT CALLBACK EarlyUnlockHook::Hook_WndProc(HWND hWnd, UINT uMsg, WPARAM wPar
         if (cfg.enableDirectHotkeys) {
             bool modifierActive = true;
             if (cfg.requireModifier && cfg.modifierKey != 0) {
-                modifierActive = (GetAsyncKeyState(cfg.modifierKey) & 0x8000) != 0;
+                modifierActive = ((lParam & (1 << 29)) != 0) || ((GetAsyncKeyState(cfg.modifierKey) & 0x8000) != 0);
             }
 
             if (modifierActive) {
                 std::string msg;
                 if (wParam == cfg.keyKliff) {
                     SwitchManager::Instance().SwitchToCharacter(CharacterType::Kliff, msg);
-                    Logger::Log("[Hotkey] Switch to Kliff requested: %s\n", msg.c_str());
+                    Logger::Log("[Hotkey WndProc] Switch to Kliff requested: %s\n", msg.c_str());
                     return 0;
                 } else if (wParam == cfg.keyDamiane) {
                     SwitchManager::Instance().SwitchToCharacter(CharacterType::Damiane, msg);
-                    Logger::Log("[Hotkey] Switch to Damiane requested: %s\n", msg.c_str());
+                    Logger::Log("[Hotkey WndProc] Switch to Damiane requested: %s\n", msg.c_str());
                     return 0;
                 } else if (wParam == cfg.keyOongka) {
                     SwitchManager::Instance().SwitchToCharacter(CharacterType::Oongka, msg);
-                    Logger::Log("[Hotkey] Switch to Oongka requested: %s\n", msg.c_str());
+                    Logger::Log("[Hotkey WndProc] Switch to Oongka requested: %s\n", msg.c_str());
                     return 0;
                 } else if (wParam == cfg.keyCycleNext) {
                     SwitchManager::Instance().CycleNextCharacter(msg);
-                    Logger::Log("[Hotkey] Cycle character requested: %s\n", msg.c_str());
+                    Logger::Log("[Hotkey WndProc] Cycle character requested: %s\n", msg.c_str());
                     return 0;
                 }
             }
@@ -70,6 +70,8 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
     (void)lpParam;
     Logger::Log("[EarlyUnlockHook] State monitor thread started.\n");
 
+    auto lastHotkeyTime = std::chrono::steady_clock::now();
+
     while (!s_stopRequested) {
         const auto& cfg = Config::Get();
 
@@ -78,32 +80,55 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
             SwitchManager::Instance().ForceUnlockAll();
         }
 
-        // 2. Fail-safe GetAsyncKeyState polling for direct hotkeys (only if WndProc is not hooked)
-        if (cfg.enableDirectHotkeys && !s_originalWndProc) {
-            bool modifierActive = true;
-            if (cfg.requireModifier && cfg.modifierKey != 0) {
-                modifierActive = (GetAsyncKeyState(cfg.modifierKey) & 0x8000) != 0;
+        // Lazy window hook if not hooked during early DLL injection
+        if (!s_originalWndProc) {
+            s_gameWindow = FindWindowW(nullptr, L"Crimson Desert");
+            if (!s_gameWindow) {
+                s_gameWindow = GetForegroundWindow();
             }
-
-            if (modifierActive) {
-                std::string msg;
-                if (GetAsyncKeyState(cfg.keyKliff) & 1) {
-                    SwitchManager::Instance().SwitchToCharacter(CharacterType::Kliff, msg);
-                    Logger::Log("[Hotkey Async] Switch to Kliff: %s\n", msg.c_str());
-                } else if (GetAsyncKeyState(cfg.keyDamiane) & 1) {
-                    SwitchManager::Instance().SwitchToCharacter(CharacterType::Damiane, msg);
-                    Logger::Log("[Hotkey Async] Switch to Damiane: %s\n", msg.c_str());
-                } else if (GetAsyncKeyState(cfg.keyOongka) & 1) {
-                    SwitchManager::Instance().SwitchToCharacter(CharacterType::Oongka, msg);
-                    Logger::Log("[Hotkey Async] Switch to Oongka: %s\n", msg.c_str());
-                } else if (GetAsyncKeyState(cfg.keyCycleNext) & 1) {
-                    SwitchManager::Instance().CycleNextCharacter(msg);
-                    Logger::Log("[Hotkey Async] Cycle: %s\n", msg.c_str());
+            if (s_gameWindow) {
+                s_originalWndProc = (WNDPROC)SetWindowLongPtr(s_gameWindow, GWLP_WNDPROC, (LONG_PTR)Hook_WndProc);
+                if (s_originalWndProc) {
+                    Logger::Log("[EarlyUnlockHook] Dynamically hooked WndProc on game window: 0x%p\n", (void*)s_gameWindow);
                 }
             }
         }
 
-        Sleep(100);
+        // 2. High-reliability asynchronous hotkey polling with 250ms debouncing
+        if (cfg.enableDirectHotkeys) {
+            auto now = std::chrono::steady_clock::now();
+            auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastHotkeyTime).count();
+
+            if (elapsedMs >= 250) {
+                bool modifierActive = true;
+                if (cfg.requireModifier && cfg.modifierKey != 0) {
+                    modifierActive = (GetAsyncKeyState(cfg.modifierKey) & 0x8000) != 0;
+                }
+
+                if (modifierActive) {
+                    std::string msg;
+                    if ((GetAsyncKeyState(cfg.keyKliff) & 0x8000) != 0) {
+                        lastHotkeyTime = now;
+                        SwitchManager::Instance().SwitchToCharacter(CharacterType::Kliff, msg);
+                        Logger::Log("[Hotkey Async] Switch to Kliff: %s\n", msg.c_str());
+                    } else if ((GetAsyncKeyState(cfg.keyDamiane) & 0x8000) != 0) {
+                        lastHotkeyTime = now;
+                        SwitchManager::Instance().SwitchToCharacter(CharacterType::Damiane, msg);
+                        Logger::Log("[Hotkey Async] Switch to Damiane: %s\n", msg.c_str());
+                    } else if ((GetAsyncKeyState(cfg.keyOongka) & 0x8000) != 0) {
+                        lastHotkeyTime = now;
+                        SwitchManager::Instance().SwitchToCharacter(CharacterType::Oongka, msg);
+                        Logger::Log("[Hotkey Async] Switch to Oongka: %s\n", msg.c_str());
+                    } else if ((GetAsyncKeyState(cfg.keyCycleNext) & 0x8000) != 0) {
+                        lastHotkeyTime = now;
+                        SwitchManager::Instance().CycleNextCharacter(msg);
+                        Logger::Log("[Hotkey Async] Cycle: %s\n", msg.c_str());
+                    }
+                }
+            }
+        }
+
+        Sleep(50);
     }
 
     Logger::Log("[EarlyUnlockHook] State monitor thread exited.\n");
@@ -118,7 +143,7 @@ bool EarlyUnlockHook::Install() {
     // Initialize SwitchManager
     SwitchManager::Instance().Initialize();
 
-    // 1. Hook Window Procedure on active game window
+    // 1. Hook Window Procedure on active game window if available
     s_gameWindow = FindWindowW(nullptr, L"Crimson Desert");
     if (!s_gameWindow) {
         s_gameWindow = GetActiveWindow();
