@@ -83,13 +83,14 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
         // Lazy window hook if not hooked during early DLL injection
         if (!s_originalWndProc) {
             s_gameWindow = FindWindowW(nullptr, L"Crimson Desert");
-            if (!s_gameWindow) {
-                s_gameWindow = GetForegroundWindow();
-            }
             if (s_gameWindow) {
-                s_originalWndProc = (WNDPROC)SetWindowLongPtr(s_gameWindow, GWLP_WNDPROC, (LONG_PTR)Hook_WndProc);
-                if (s_originalWndProc) {
-                    Logger::Log("[EarlyUnlockHook] Dynamically hooked WndProc on game window: 0x%p\n", (void*)s_gameWindow);
+                DWORD pid = 0;
+                GetWindowThreadProcessId(s_gameWindow, &pid);
+                if (pid == GetCurrentProcessId()) {
+                    s_originalWndProc = (WNDPROC)SetWindowLongPtr(s_gameWindow, GWLP_WNDPROC, (LONG_PTR)Hook_WndProc);
+                    if (s_originalWndProc) {
+                        Logger::Log("[EarlyUnlockHook] Dynamically hooked WndProc on game window: 0x%p\n", (void*)s_gameWindow);
+                    }
                 }
             }
         }
