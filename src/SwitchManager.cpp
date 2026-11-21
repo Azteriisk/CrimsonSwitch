@@ -242,65 +242,131 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
         return false;
     }
 
-    uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
-    if (!mgr) return false;
+    __try {
+        if (IsBadReadPtr(reinterpret_cast<const void*>(m_actorManagerGlobal), sizeof(uintptr_t))) {
+            outMessage = "Actor Manager pointer unreadable.";
+            return false;
+        }
 
-    uintptr_t userActor = *reinterpret_cast<uintptr_t*>(mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR);
-    if (!userActor) return false;
+        uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
+        if (mgr < 0x10000 || mgr > 0x7FFFFFFFFFFF) {
+            outMessage = "Actor Manager not active.";
+            return false;
+        }
 
-    uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR);
-    if (!subMgr) return false;
+        uintptr_t userActorAddr = mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(userActorAddr), sizeof(uintptr_t))) {
+            outMessage = "UserActor address unreadable.";
+            return false;
+        }
 
-    uintptr_t targetCcoia = 0;
+        uintptr_t userActor = *reinterpret_cast<uintptr_t*>(userActorAddr);
+        if (userActor < 0x10000 || userActor > 0x7FFFFFFFFFFF) {
+            outMessage = "UserActor not spawned in current scene.";
+            return false;
+        }
 
-    if (targetChar == CharacterType::Kliff) {
-        // Kliff is always the permanent anchor at SubManager + 0x30
-        targetCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
-    } else {
-        // Search ChildContainerActorComponent list for Damiane or Oongka
-        uintptr_t compVec = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_COMP_VEC);
-        if (compVec) {
-            uintptr_t childContainer = *reinterpret_cast<uintptr_t*>(compVec + 0x20); // vec[2]
-            if (childContainer) {
-                uintptr_t actorList = *reinterpret_cast<uintptr_t*>(childContainer + BlackSpaceOffsets::CHILD_CONTAINER_ACTOR_LIST);
-                if (actorList) {
-                    for (int i = 0; i < 100; ++i) {
-                        uintptr_t entryCcoia = *reinterpret_cast<uintptr_t*>(actorList + (i * 16));
-                        if (entryCcoia) {
-                            // Check appearance
-                            if (targetChar == CharacterType::Damiane && m_status.damianeCcoia == entryCcoia) {
-                                targetCcoia = entryCcoia;
-                                break;
-                            }
-                            if (targetChar == CharacterType::Oongka && m_status.oongkaCcoia == entryCcoia) {
-                                targetCcoia = entryCcoia;
-                                break;
+        uintptr_t subMgrAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(subMgrAddr), sizeof(uintptr_t))) {
+            outMessage = "SubManager address unreadable.";
+            return false;
+        }
+
+        uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(subMgrAddr);
+        if (subMgr < 0x10000 || subMgr > 0x7FFFFFFFFFFF) {
+            outMessage = "SubManager not active.";
+            return false;
+        }
+
+        uintptr_t targetCcoia = 0;
+
+        if (targetChar == CharacterType::Kliff) {
+            // Kliff is always the permanent anchor at SubManager + 0x30
+            uintptr_t kliffAddr = subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA;
+            if (!IsBadReadPtr(reinterpret_cast<const void*>(kliffAddr), sizeof(uintptr_t))) {
+                targetCcoia = *reinterpret_cast<uintptr_t*>(kliffAddr);
+            }
+        } else {
+            // Search ChildContainerActorComponent list for Damiane or Oongka
+            uintptr_t compVecAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_COMP_VEC;
+            if (!IsBadReadPtr(reinterpret_cast<const void*>(compVecAddr), sizeof(uintptr_t))) {
+                uintptr_t compVec = *reinterpret_cast<uintptr_t*>(compVecAddr);
+                if (compVec >= 0x10000 && compVec <= 0x7FFFFFFFFFFF &&
+                    !IsBadReadPtr(reinterpret_cast<const void*>(compVec + 0x20), sizeof(uintptr_t))) {
+                    uintptr_t childContainer = *reinterpret_cast<uintptr_t*>(compVec + 0x20);
+                    if (childContainer >= 0x10000 && childContainer <= 0x7FFFFFFFFFFF &&
+                        !IsBadReadPtr(reinterpret_cast<const void*>(childContainer + BlackSpaceOffsets::CHILD_CONTAINER_ACTOR_LIST), sizeof(uintptr_t))) {
+                        uintptr_t actorList = *reinterpret_cast<uintptr_t*>(childContainer + BlackSpaceOffsets::CHILD_CONTAINER_ACTOR_LIST);
+                        if (actorList >= 0x10000 && actorList <= 0x7FFFFFFFFFFF) {
+                            for (int i = 0; i < 32; ++i) {
+                                uintptr_t entryAddr = actorList + (i * 16);
+                                if (IsBadReadPtr(reinterpret_cast<const void*>(entryAddr), sizeof(uintptr_t))) break;
+                                uintptr_t entryCcoia = *reinterpret_cast<uintptr_t*>(entryAddr);
+                                if (entryCcoia < 0x10000 || entryCcoia > 0x7FFFFFFFFFFF) continue;
+
+                                // Inspect appearance
+                                uintptr_t compTableAddr = entryCcoia + 0x68;
+                                if (!IsBadReadPtr(reinterpret_cast<const void*>(compTableAddr), sizeof(uintptr_t))) {
+                                    uintptr_t compTable = *reinterpret_cast<uintptr_t*>(compTableAddr);
+                                    if (compTable >= 0x10000 && compTable <= 0x7FFFFFFFFFFF &&
+                                        !IsBadReadPtr(reinterpret_cast<const void*>(compTable + 0x40), sizeof(uintptr_t))) {
+                                        uintptr_t p1 = *reinterpret_cast<uintptr_t*>(compTable + 0x40);
+                                        if (p1 >= 0x10000 && p1 <= 0x7FFFFFFFFFFF &&
+                                            !IsBadReadPtr(reinterpret_cast<const void*>(p1 + 0x40), sizeof(uintptr_t))) {
+                                            uintptr_t p2 = *reinterpret_cast<uintptr_t*>(p1 + 0x40);
+                                            if (p2 >= 0x10000 && p2 <= 0x7FFFFFFFFFFF &&
+                                                !IsBadReadPtr(reinterpret_cast<const void*>(p2 + 0x38), sizeof(uintptr_t))) {
+                                                const char* appPath = reinterpret_cast<const char*>(p2 + 0x38);
+                                                if (appPath && !IsBadStringPtrA(appPath, 256)) {
+                                                    std::string_view path(appPath);
+                                                    if (targetChar == CharacterType::Damiane &&
+                                                        (path.find("damian") != std::string_view::npos || path.find("Damian") != std::string_view::npos)) {
+                                                        targetCcoia = entryCcoia;
+                                                        break;
+                                                    }
+                                                    if (targetChar == CharacterType::Oongka &&
+                                                        (path.find("oongka") != std::string_view::npos || path.find("Oongka") != std::string_view::npos)) {
+                                                        targetCcoia = entryCcoia;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
         }
-    }
 
-    if (targetCcoia != 0) {
-        // Rotate currently controlled actor
-        *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA) = targetCcoia;
-        *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_CONTROLLED) = targetCcoia;
+        if (targetCcoia != 0 && targetCcoia >= 0x10000 && targetCcoia <= 0x7FFFFFFFFFFF) {
+            uintptr_t ctrlAddr1 = subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA;
+            uintptr_t ctrlAddr2 = userActor + BlackSpaceOffsets::USER_ACTOR_TO_CONTROLLED;
+            if (!IsBadWritePtr(reinterpret_cast<void*>(ctrlAddr1), sizeof(uintptr_t))) {
+                *reinterpret_cast<uintptr_t*>(ctrlAddr1) = targetCcoia;
+            }
+            if (!IsBadWritePtr(reinterpret_cast<void*>(ctrlAddr2), sizeof(uintptr_t))) {
+                *reinterpret_cast<uintptr_t*>(ctrlAddr2) = targetCcoia;
+            }
 
-        m_status.controlledCcoia = targetCcoia;
-        m_status.activeCharacter = targetChar;
+            m_status.controlledCcoia = targetCcoia;
+            m_status.activeCharacter = targetChar;
 
-        outMessage = std::string("Successfully switched to ") + CharacterToString(targetChar) + "!";
-        Logger::Log("[SwitchManager] %s (Controlled CCOIA: 0x%p)\n", outMessage.c_str(), (void*)targetCcoia);
-        return true;
-    } else {
-        // Early prologue fallback: companion not spawned yet in world.
-        // We set the active hero intent so when the actor container refreshes, Damiane/Oongka spawns directly.
-        m_status.activeCharacter = targetChar;
-        outMessage = std::string("Early Prologue: Dispatched spawn and control request for ") + CharacterToString(targetChar) + "!";
-        Logger::Log("[SwitchManager] %s\n", outMessage.c_str());
-        return true;
+            outMessage = std::string("Successfully switched to ") + CharacterToString(targetChar) + "!";
+            Logger::Log("[SwitchManager] %s (Controlled CCOIA: 0x%p)\n", outMessage.c_str(), (void*)targetCcoia);
+            return true;
+        } else {
+            outMessage = std::string("Mercenary ") + CharacterToString(targetChar) + 
+                         " is not yet available in current chapter (Prologue tutorial). Progress past prologue to switch.";
+            Logger::Log("[SwitchManager] %s\n", outMessage.c_str());
+            return false;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        outMessage = "Character switch guarded against memory violation.";
+        Logger::Log("[SwitchManager] Exception caught during character switch attempt.\n");
+        return false;
     }
 }
 

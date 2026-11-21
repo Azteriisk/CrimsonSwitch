@@ -78,8 +78,8 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
             SwitchManager::Instance().ForceUnlockAll();
         }
 
-        // 2. Fail-safe GetAsyncKeyState polling for direct hotkeys
-        if (cfg.enableDirectHotkeys) {
+        // 2. Fail-safe GetAsyncKeyState polling for direct hotkeys (only if WndProc is not hooked)
+        if (cfg.enableDirectHotkeys && !s_originalWndProc) {
             bool modifierActive = true;
             if (cfg.requireModifier && cfg.modifierKey != 0) {
                 modifierActive = (GetAsyncKeyState(cfg.modifierKey) & 0x8000) != 0;
@@ -89,12 +89,16 @@ DWORD WINAPI EarlyUnlockHook::MonitorThread(LPVOID lpParam) {
                 std::string msg;
                 if (GetAsyncKeyState(cfg.keyKliff) & 1) {
                     SwitchManager::Instance().SwitchToCharacter(CharacterType::Kliff, msg);
+                    Logger::Log("[Hotkey Async] Switch to Kliff: %s\n", msg.c_str());
                 } else if (GetAsyncKeyState(cfg.keyDamiane) & 1) {
                     SwitchManager::Instance().SwitchToCharacter(CharacterType::Damiane, msg);
+                    Logger::Log("[Hotkey Async] Switch to Damiane: %s\n", msg.c_str());
                 } else if (GetAsyncKeyState(cfg.keyOongka) & 1) {
                     SwitchManager::Instance().SwitchToCharacter(CharacterType::Oongka, msg);
+                    Logger::Log("[Hotkey Async] Switch to Oongka: %s\n", msg.c_str());
                 } else if (GetAsyncKeyState(cfg.keyCycleNext) & 1) {
                     SwitchManager::Instance().CycleNextCharacter(msg);
+                    Logger::Log("[Hotkey Async] Cycle: %s\n", msg.c_str());
                 }
             }
         }
