@@ -1,0 +1,14 @@
+build/
+bin/
+out/
+*.obj
+*.pdb
+*.lib
+*.exp
+*.exe
+*.dll
+*.ilk
+*.log
+.vs/
+.vscode/
+.idea/
