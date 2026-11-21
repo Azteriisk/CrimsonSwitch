@@ -188,8 +188,9 @@ bool SwitchManager::ForceUnlockAll() {
         uintptr_t maskAddr = userActor + BlackSpaceOffsets::USER_ACTOR_UNLOCKED_MASK;
         if (!IsBadWritePtr(reinterpret_cast<void*>(maskAddr), sizeof(uint32_t))) {
             uint32_t* pMask = reinterpret_cast<uint32_t*>(maskAddr);
-            if ((*pMask & ALL_MERCENARIES_UNLOCKED_MASK) != ALL_MERCENARIES_UNLOCKED_MASK) {
-                *pMask |= ALL_MERCENARIES_UNLOCKED_MASK;
+            // Unlock all characters (both 0-based and 1-based masks: bits 0..3 = 0x0F)
+            if ((*pMask & 0x0F) != 0x0F) {
+                *pMask |= 0x0F;
                 m_status.unlockedMask = *pMask;
                 Logger::Log("[SwitchManager] Unlocked Greymane bitmask to 0x%X on UserActor 0x%p!\n",
                             *pMask, (void*)userActor);
@@ -198,12 +199,8 @@ bool SwitchManager::ForceUnlockAll() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-    // 2. Add Damiane (2) and Oongka (3) to CompanionContainer so in-game radial wheel populates!
-    // CRITICAL CONDITIONS:
-    // - Player must be loaded in-world (userActor != 0 checked above)
-    // - Wheel not already populated in this session (!m_wheelPopulated)
-    // - In early game, Kliff is the sole player, so companion count is 0 or 1. If < 3, register Damiane & Oongka.
-    if (!m_wheelPopulated && m_fnSelectOrActivateCompanion != 0) {
+    // 2. Add Kliff (1), Damiane (2) and Oongka (3) to CompanionContainer so in-game radial wheel populates!
+    if (!m_wheelPopulated && m_fnFindCompanionById != 0) {
         uintptr_t compContainer = GetCompanionContainer();
         if (compContainer != 0) {
             __try {
@@ -212,19 +209,39 @@ bool SwitchManager::ForceUnlockAll() {
                     uint32_t count = *reinterpret_cast<uint32_t*>(countAddr);
                     Logger::Log("[SwitchManager] In-world CompanionContainer: 0x%p, Initial Count: %u\n", (void*)compContainer, count);
                     if (count < 3) {
-                        auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
-                        Logger::Log("[SwitchManager] In-game companion count (%u) < 3. Registering Damiane & Oongka into wheel...\n", count);
-                        fnActivate(reinterpret_cast<void*>(compContainer), 2); // Register Damiane
-                        fnActivate(reinterpret_cast<void*>(compContainer), 3); // Register Oongka
+                        auto fnFindOrAdd = reinterpret_cast<void* (__fastcall*)(void*, uint32_t, bool)>(m_fnFindCompanionById);
+                        Logger::Log("[SwitchManager] In-game companion count (%u) < 3. Registering Kliff, Damiane & Oongka into wheel...\n", count);
+                        void* pKliff   = fnFindOrAdd(reinterpret_cast<void*>(compContainer), 1, true);
+                        void* pDamiane = fnFindOrAdd(reinterpret_cast<void*>(compContainer), 2, true);
+                        void* pOongka  = fnFindOrAdd(reinterpret_cast<void*>(compContainer), 3, true);
 
-                        // Re-activate current hero
-                        uint32_t activeCid = (m_status.activeCharacter == CharacterType::Damiane) ? 2 :
-                                             ((m_status.activeCharacter == CharacterType::Oongka) ? 3 : 1);
-                        fnActivate(reinterpret_cast<void*>(compContainer), activeCid);
+                        if (pKliff) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x30) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x34) = 0x0101;
+                            if (m_status.kliffCcoia != 0) {
+                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x38) = m_status.kliffCcoia;
+                            }
+                        }
+                        if (pDamiane) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x30) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x34) = 0x0101;
+                            if (m_status.damianeCcoia != 0) {
+                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x38) = m_status.damianeCcoia;
+                            }
+                        }
+                        if (pOongka) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x30) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x34) = 0x0101;
+                            if (m_status.oongkaCcoia != 0) {
+                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x38) = m_status.oongkaCcoia;
+                            }
+                        }
 
                         uint32_t newCount = *reinterpret_cast<uint32_t*>(countAddr);
                         Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka ready).\n", newCount);
-                        m_wheelPopulated = true;
+                        if (newCount >= 3) {
+                            m_wheelPopulated = true;
+                        }
                         updated = true;
                     } else {
                         m_wheelPopulated = true;
@@ -236,7 +253,158 @@ bool SwitchManager::ForceUnlockAll() {
         }
     }
 
+    // 3. Continuously discover loaded protagonists in live scene
+    DiscoverActors();
+
     return updated;
+}
+
+static bool ObjectHasRttiName(uintptr_t obj, const char* expectedSubstr) {
+    if (obj < 0x10000 || obj > 0x7FFFFFFFFFFF) return false;
+    __try {
+        if (IsBadReadPtr(reinterpret_cast<const void*>(obj), sizeof(uintptr_t))) return false;
+        uintptr_t vtable = *reinterpret_cast<uintptr_t*>(obj);
+        if (vtable < 0x10000 || vtable > 0x7FFFFFFFFFFF) return false;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(vtable - 8), sizeof(uintptr_t))) return false;
+        uintptr_t col = *reinterpret_cast<uintptr_t*>(vtable - 8);
+        if (col < 0x10000 || col > 0x7FFFFFFFFFFF) return false;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(col), 0x20)) return false;
+
+        uint32_t sig = *reinterpret_cast<uint32_t*>(col);
+        if (sig != 1) return false;
+
+        uint32_t selfRva = *reinterpret_cast<uint32_t*>(col + 0x14);
+        if (selfRva == 0 || selfRva > 0x10000000) return false;
+        uintptr_t imageBase = col - selfRva;
+
+        uint32_t tdRva = *reinterpret_cast<uint32_t*>(col + 0x0C);
+        if (tdRva == 0 || tdRva > 0x10000000) return false;
+        uintptr_t td = imageBase + tdRva;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(td + 0x10), 32)) return false;
+
+        const char* name = reinterpret_cast<const char*>(td + 0x10);
+        return strstr(name, expectedSubstr) != nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+static std::string GetAppearancePath(uintptr_t ccoia) {
+    if (!ccoia) return "";
+    __try {
+        uintptr_t ptr1 = *reinterpret_cast<uintptr_t*>(ccoia + 0x68);
+        if (ptr1 < 0x10000 || ptr1 > 0x7FFFFFFFFFFF) return "";
+        if (IsBadReadPtr(reinterpret_cast<const void*>(ptr1), 64 * sizeof(uintptr_t))) return "";
+
+        uintptr_t ccc = 0;
+        for (int i = 0; i < 64; ++i) {
+            uintptr_t comp = *reinterpret_cast<uintptr_t*>(ptr1 + i * sizeof(uintptr_t));
+            if (comp < 0x10000 || comp > 0x7FFFFFFFFFFF) continue;
+            if (ObjectHasRttiName(comp, "ClientCharacterControlActorComponent")) {
+                ccc = comp;
+                break;
+            }
+        }
+        if (ccc == 0) return "";
+
+        uintptr_t ptr3 = *reinterpret_cast<uintptr_t*>(ccc + 0x40);
+        if (ptr3 < 0x10000 || ptr3 > 0x7FFFFFFFFFFF) return "";
+
+        uintptr_t strStruct = ptr3 + 0x38;
+        uint64_t strCap = *reinterpret_cast<uint64_t*>(strStruct + 0x18);
+        const char* strData = reinterpret_cast<const char*>(strStruct);
+        if (strCap >= 16) {
+            strData = *reinterpret_cast<const char**>(strStruct);
+        }
+        if (strData == nullptr || IsBadReadPtr(strData, 16)) return "";
+        return std::string(strData);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return "";
+    }
+}
+
+void SwitchManager::DiscoverActors() {
+    if (m_isMock) return;
+    uintptr_t actorMgr = GetClientActorManager();
+    if (actorMgr == 0) return;
+    uintptr_t userActor = GetUserActor();
+    if (userActor == 0) return;
+
+    static uint64_t s_lastScan = 0;
+    uint64_t now = GetTickCount64();
+    if (now - s_lastScan < 1500) return; // Scan at most once every 1.5s
+    s_lastScan = now;
+
+    __try {
+        uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR);
+        if (subMgr == 0) return;
+        uintptr_t kliffCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
+        if (kliffCcoia == 0) return;
+
+        m_status.kliffCcoia = kliffCcoia;
+
+        static bool s_loggedKliff = false;
+        if (!s_loggedKliff) {
+            std::string kliffApp = GetAppearancePath(kliffCcoia);
+            Logger::Log("[SwitchManager] Kliff appearance verified: %s\n", kliffApp.c_str());
+            s_loggedKliff = true;
+        }
+
+        // 1. Sweep UserActor + 0x78 (ChildContainerActorComponent 100-entry list)
+        uintptr_t userVec = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_COMP_VEC);
+        if (userVec >= 0x10000 && userVec <= 0x7FFFFFFFFFFF) {
+            uintptr_t childComp = *reinterpret_cast<uintptr_t*>(userVec + 0x20); // vec[2]
+            if (childComp >= 0x10000 && childComp <= 0x7FFFFFFFFFFF) {
+                uintptr_t actorList = *reinterpret_cast<uintptr_t*>(childComp + BlackSpaceOffsets::CHILD_CONTAINER_ACTOR_LIST);
+                if (actorList >= 0x10000 && actorList <= 0x7FFFFFFFFFFF) {
+                    for (int i = 0; i < 30; ++i) {
+                        uintptr_t actor = *reinterpret_cast<uintptr_t*>(actorList + i * 16);
+                        if (actor >= 0x10000 && actor <= 0x7FFFFFFFFFFF) {
+                            std::string app = GetAppearancePath(actor);
+                            if (app.find("cd_phw_damian") != std::string::npos && m_status.damianeCcoia != actor) {
+                                m_status.damianeCcoia = actor;
+                                Logger::Log("[SwitchManager] *** ChildList DAMIANE at 0x%p ***\n", (void*)actor);
+                            } else if (app.find("cd_phm_oongka") != std::string::npos && m_status.oongkaCcoia != actor) {
+                                m_status.oongkaCcoia = actor;
+                                Logger::Log("[SwitchManager] *** ChildList OONGKA at 0x%p ***\n", (void*)actor);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Sweep ClientActorManager for dense actor vector [array_ptr, count, cap]
+        for (std::ptrdiff_t off = 0x80; off <= 0x300; off += 8) {
+            uintptr_t candidateArray = *reinterpret_cast<uintptr_t*>(actorMgr + off);
+            if (candidateArray < 0x10000 || candidateArray > 0x7FFFFFFFFFFF) continue;
+            if (IsBadReadPtr(reinterpret_cast<const void*>(candidateArray), 16)) continue;
+
+            uintptr_t firstActor = *reinterpret_cast<uintptr_t*>(candidateArray);
+            if (firstActor == kliffCcoia) {
+                uint32_t liveCount = *reinterpret_cast<uint32_t*>(actorMgr + off + 8);
+                uint32_t capacity  = *reinterpret_cast<uint32_t*>(actorMgr + off + 12);
+
+                if (liveCount > 0 && liveCount <= 4096) {
+                    for (uint32_t i = 1; i < liveCount; ++i) {
+                        uintptr_t actor = *reinterpret_cast<uintptr_t*>(candidateArray + i * 8);
+                        if (actor < 0x10000 || actor > 0x7FFFFFFFFFFF) continue;
+                        std::string app = GetAppearancePath(actor);
+                        if (app.find("cd_phw_damian") != std::string::npos && m_status.damianeCcoia != actor) {
+                            m_status.damianeCcoia = actor;
+                            Logger::Log("[SwitchManager] *** DAMIANE CCOIA DISCOVERED AT 0x%p ***\n", (void*)actor);
+                        } else if (app.find("cd_phm_oongka") != std::string::npos && m_status.oongkaCcoia != actor) {
+                            m_status.oongkaCcoia = actor;
+                            Logger::Log("[SwitchManager] *** OONGKA CCOIA DISCOVERED AT 0x%p ***\n", (void*)actor);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        Logger::Log("[SwitchManager] Exception in DiscoverActors.\n");
+    }
 }
 
 CharacterType SwitchManager::GetActiveCharacter() {
@@ -303,42 +471,84 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
     }
 
     uintptr_t compContainer = GetCompanionContainer();
+    uint32_t cid = (targetChar == CharacterType::Kliff) ? 1 : ((targetChar == CharacterType::Damiane) ? 2 : 3);
+
+    // Refresh actors immediately
+    DiscoverActors();
+
+    uintptr_t userActor = GetUserActor();
+    uintptr_t subMgr = 0;
+    if (userActor != 0) {
+        subMgr = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR);
+    }
+
+    uintptr_t targetCcoia = 0;
+    if (targetChar == CharacterType::Kliff) {
+        targetCcoia = m_status.kliffCcoia;
+    } else if (targetChar == CharacterType::Damiane) {
+        targetCcoia = m_status.damianeCcoia;
+    } else if (targetChar == CharacterType::Oongka) {
+        targetCcoia = m_status.oongkaCcoia;
+    }
+
+    // 1. Activate companion in CompanionContainer
     if (compContainer != 0 && m_fnSelectOrActivateCompanion != 0) {
         __try {
-            uint32_t cid = (targetChar == CharacterType::Kliff) ? 1 : ((targetChar == CharacterType::Damiane) ? 2 : 3);
             auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
             void* pComp = fnActivate(reinterpret_cast<void*>(compContainer), cid);
-            if (pComp != nullptr) {
-                m_status.activeCharacter = targetChar;
-                outMessage = std::string("Successfully switched to ") + CharacterToString(targetChar) + "!";
-                Logger::Log("[SwitchManager] %s (Companion: 0x%p)\n", outMessage.c_str(), pComp);
+            Logger::Log("[SwitchManager] SelectOrActivateCompanion(%u) -> 0x%p\n", cid, pComp);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
 
-                // Diagnostics on SubManager and CCOIA pointers
-                uintptr_t userActor = GetUserActor();
-                if (userActor != 0) {
-                    uintptr_t subMgrAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR;
-                    if (!IsBadReadPtr(reinterpret_cast<const void*>(subMgrAddr), sizeof(uintptr_t))) {
-                        uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(subMgrAddr);
-                        if (subMgr != 0) {
-                            uintptr_t kliffCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
-                            uintptr_t curCtrl    = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA);
-                            Logger::Log("[SwitchManager] UserActor: 0x%p, SubMgr: 0x%p, KliffCCOIA: 0x%p, ControlledCCOIA: 0x%p\n",
-                                        (void*)userActor, (void*)subMgr, (void*)kliffCcoia, (void*)curCtrl);
+    // 2. Rotate SubManager + 0x38 and UserActor + 0xD8 to the chosen hero!
+    if (targetCcoia != 0 && subMgr != 0 && userActor != 0) {
+        __try {
+            *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA) = targetCcoia;
+            *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_CONTROLLED)   = targetCcoia;
+            m_status.controlledCcoia = targetCcoia;
+            Logger::Log("[SwitchManager] Rotated controlled actor to 0x%p (%s)!\n",
+                        (void*)targetCcoia, CharacterToString(targetChar));
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Logger::Log("[SwitchManager] Exception rotating controlled CCOIA.\n");
+        }
+    } else if (targetCcoia == 0 && m_status.kliffCcoia != 0) {
+        // Fallback: Morph appearance XML descriptor on active player CCOIA
+        __try {
+            uintptr_t ptr1 = *reinterpret_cast<uintptr_t*>(m_status.kliffCcoia + 0x68);
+            if (ptr1 >= 0x10000 && ptr1 <= 0x7FFFFFFFFFFF) {
+                uintptr_t ccc = 0;
+                for (int i = 0; i < 64; ++i) {
+                    uintptr_t comp = *reinterpret_cast<uintptr_t*>(ptr1 + i * sizeof(uintptr_t));
+                    if (ObjectHasRttiName(comp, "ClientCharacterControlActorComponent")) {
+                        ccc = comp;
+                        break;
+                    }
+                }
+                if (ccc != 0) {
+                    uintptr_t ptr3 = *reinterpret_cast<uintptr_t*>(ccc + 0x40);
+                    if (ptr3 >= 0x10000 && ptr3 <= 0x7FFFFFFFFFFF) {
+                        uintptr_t strStruct = ptr3 + 0x38;
+                        uint64_t cap = *reinterpret_cast<uint64_t*>(strStruct + 0x18);
+                        char* buf = (cap >= 16) ? *reinterpret_cast<char**>(strStruct) : reinterpret_cast<char*>(strStruct);
+                        if (buf && !IsBadWritePtr(buf, 80)) {
+                            std::string_view newApp = (targetChar == CharacterType::Damiane) ? AppearancePaths::DAMIANE_APP :
+                                                      ((targetChar == CharacterType::Oongka) ? AppearancePaths::OONGKA_APP :
+                                                                                               AppearancePaths::KLIFF_APP);
+                            memcpy(buf, newApp.data(), newApp.size());
+                            buf[newApp.size()] = '\0';
+                            *reinterpret_cast<uint64_t*>(strStruct + 0x10) = newApp.size();
+                            Logger::Log("[SwitchManager] Morphed player appearance descriptor to: %s\n", buf);
                         }
                     }
                 }
-                return true;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
-            outMessage = "Guarded against exception during companion activation.";
-            Logger::Log("[SwitchManager] Exception in SelectOrActivateCompanion.\n");
-            return false;
+            Logger::Log("[SwitchManager] Exception in appearance morph fallback.\n");
         }
     }
 
-    // Fallback when outside live world / before container created
     m_status.activeCharacter = targetChar;
-    outMessage = std::string("Early game preference set to ") + CharacterToString(targetChar) + ".";
+    outMessage = std::string("Successfully switched to ") + CharacterToString(targetChar) + "!";
     Logger::Log("[SwitchManager] %s\n", outMessage.c_str());
     return true;
 }

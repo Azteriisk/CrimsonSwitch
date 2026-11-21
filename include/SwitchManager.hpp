@@ -39,6 +39,7 @@ public:
 
     // Force character unlock bitmask on UserActor (Unlocks radial wheel)
     bool ForceUnlockAll();
+    void DiscoverActors();
 
     // Execute character switch
     bool SwitchToCharacter(CharacterType targetChar, std::string& outMessage);
