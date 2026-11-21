@@ -284,6 +284,14 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
             Logger::Log("[SwitchManager] [CrimsonCoop Interop] Notified CrimsonCoop session of switch to %s.\n",
                         CharacterToString(targetChar));
         }
+
+        typedef void (*tSetWatermarkHero)(const wchar_t*);
+        auto fnSetHero = reinterpret_cast<tSetWatermarkHero>(GetProcAddress(hCoop, "CrimsonCoop_SetWatermarkHero"));
+        if (fnSetHero) {
+            std::wstring wname = (targetChar == CharacterType::Damiane) ? L"Damiane" :
+                                 ((targetChar == CharacterType::Oongka) ? L"Oongka" : L"Kliff");
+            fnSetHero(wname.c_str());
+        }
     }
 
     if (m_isMock) {
@@ -304,6 +312,21 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
                 m_status.activeCharacter = targetChar;
                 outMessage = std::string("Successfully switched to ") + CharacterToString(targetChar) + "!";
                 Logger::Log("[SwitchManager] %s (Companion: 0x%p)\n", outMessage.c_str(), pComp);
+
+                // Diagnostics on SubManager and CCOIA pointers
+                uintptr_t userActor = GetUserActor();
+                if (userActor != 0) {
+                    uintptr_t subMgrAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR;
+                    if (!IsBadReadPtr(reinterpret_cast<const void*>(subMgrAddr), sizeof(uintptr_t))) {
+                        uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(subMgrAddr);
+                        if (subMgr != 0) {
+                            uintptr_t kliffCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
+                            uintptr_t curCtrl    = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA);
+                            Logger::Log("[SwitchManager] UserActor: 0x%p, SubMgr: 0x%p, KliffCCOIA: 0x%p, ControlledCCOIA: 0x%p\n",
+                                        (void*)userActor, (void*)subMgr, (void*)kliffCcoia, (void*)curCtrl);
+                        }
+                    }
+                }
                 return true;
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
