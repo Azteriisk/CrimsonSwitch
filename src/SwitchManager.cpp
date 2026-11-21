@@ -202,7 +202,7 @@ bool SwitchManager::ForceUnlockAll() {
     // CRITICAL CONDITIONS:
     // - Player must be loaded in-world (userActor != 0 checked above)
     // - Wheel not already populated in this session (!m_wheelPopulated)
-    // - Count must be >= 1 (Kliff is present in live world) AND < 3
+    // - In early game, Kliff is the sole player, so companion count is 0 or 1. If < 3, register Damiane & Oongka.
     if (!m_wheelPopulated && m_fnSelectOrActivateCompanion != 0) {
         uintptr_t compContainer = GetCompanionContainer();
         if (compContainer != 0) {
@@ -210,7 +210,8 @@ bool SwitchManager::ForceUnlockAll() {
                 uintptr_t countAddr = compContainer + 0x148;
                 if (!IsBadReadPtr(reinterpret_cast<const void*>(countAddr), sizeof(uint32_t))) {
                     uint32_t count = *reinterpret_cast<uint32_t*>(countAddr);
-                    if (count >= 1 && count < 3) {
+                    Logger::Log("[SwitchManager] In-world CompanionContainer: 0x%p, Initial Count: %u\n", (void*)compContainer, count);
+                    if (count < 3) {
                         auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
                         Logger::Log("[SwitchManager] In-game companion count (%u) < 3. Registering Damiane & Oongka into wheel...\n", count);
                         fnActivate(reinterpret_cast<void*>(compContainer), 2); // Register Damiane
@@ -225,7 +226,7 @@ bool SwitchManager::ForceUnlockAll() {
                         Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka ready).\n", newCount);
                         m_wheelPopulated = true;
                         updated = true;
-                    } else if (count >= 3) {
+                    } else {
                         m_wheelPopulated = true;
                     }
                 }
