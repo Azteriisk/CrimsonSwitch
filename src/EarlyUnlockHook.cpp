@@ -2,6 +2,7 @@
 #include "SwitchManager.hpp"
 #include "Config.hpp"
 #include "Logger.hpp"
+#include "PatternScan.hpp"
 #include <MinHook.h>
 #include <iostream>
 
@@ -99,7 +100,27 @@ bool EarlyUnlockHook::Install() {
     // Initialize SwitchManager
     SwitchManager::Instance().Initialize();
 
-    // Hook Window Procedure on active game window
+    // 1. Initialize MinHook for engine function interception
+    MH_STATUS status = MH_Initialize();
+    if (status != MH_OK && status != MH_ERROR_ALREADY_INITIALIZED) {
+        Logger::Log("[EarlyUnlockHook] Notice: MH_Initialize status: %s\n", MH_StatusToString(status));
+    }
+
+    // 2. Pattern scan for IsCharacterUnlocked engine routine
+    // BlackSpace signature: mov eax, [rcx + 148h]; bt eax, edx
+    const char* IS_CHAR_UNLOCKED_AOB = "8B 81 48 01 00 00";
+    HMODULE hGame = GetModuleHandleW(nullptr);
+    if (hGame) {
+        uintptr_t scanAddr = PatternScanner::Scan(hGame, IS_CHAR_UNLOCKED_AOB);
+        if (scanAddr != 0) {
+            if (MH_CreateHook(reinterpret_cast<LPVOID>(scanAddr), reinterpret_cast<LPVOID>(Hook_IsCharacterUnlocked), reinterpret_cast<LPVOID*>(&oIsCharacterUnlocked)) == MH_OK) {
+                MH_EnableHook(reinterpret_cast<LPVOID>(scanAddr));
+                Logger::Log("[EarlyUnlockHook] Successfully hooked engine IsCharacterUnlocked at 0x%p\n", (void*)scanAddr);
+            }
+        }
+    }
+
+    // 3. Hook Window Procedure on active game window
     s_gameWindow = FindWindowW(nullptr, L"Crimson Desert");
     if (!s_gameWindow) {
         s_gameWindow = GetActiveWindow();
@@ -109,7 +130,7 @@ bool EarlyUnlockHook::Install() {
         Logger::Log("[EarlyUnlockHook] Hooked WndProc on game window: 0x%p\n", (void*)s_gameWindow);
     }
 
-    // Launch background state & hotkey thread
+    // 4. Launch background state & hotkey thread
     s_stopRequested = false;
     s_hMonitorThread = CreateThread(nullptr, 0, MonitorThread, nullptr, 0, nullptr);
 
@@ -132,6 +153,9 @@ void EarlyUnlockHook::Remove() {
         SetWindowLongPtr(s_gameWindow, GWLP_WNDPROC, (LONG_PTR)s_originalWndProc);
         s_originalWndProc = nullptr;
     }
+
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
 
     s_isInstalled = false;
     Logger::Log("[EarlyUnlockHook] Hooks removed.\n");

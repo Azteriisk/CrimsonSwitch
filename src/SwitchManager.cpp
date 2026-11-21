@@ -60,6 +60,11 @@ void SwitchManager::SetupMockEnvironment(uintptr_t mockUserActor, uintptr_t mock
     m_status.unlockedMask = 0x02; // Vanilla starts with only Kliff (bit 1)
 }
 
+void SwitchManager::SetCoopArbitrationMock(std::function<bool(CharacterType)> isOccupiedFn) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_mockCoopArbitration = std::move(isOccupiedFn);
+}
+
 bool SwitchManager::ForceUnlockAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -153,6 +158,39 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
     if (targetChar == m_status.activeCharacter) {
         outMessage = std::string("Already playing as ") + CharacterToString(targetChar) + ".";
         return false;
+    }
+
+    // 1. Interop check: Mock arbitration (for automated offline tests)
+    if (m_mockCoopArbitration && m_mockCoopArbitration(targetChar)) {
+        outMessage = std::string(CharacterToString(targetChar)) + " is currently piloted by a co-op peer!";
+        Logger::Log("[SwitchManager] [INTEROP] Switch blocked: %s\n", outMessage.c_str());
+        return false;
+    }
+
+    // 2. Interop check: Real runtime coordination with CrimsonCoop.dll if co-loaded
+    HMODULE hCoop = GetModuleHandleW(L"CrimsonCoop.dll");
+    if (hCoop) {
+        typedef bool (*tCoopActive)();
+        typedef bool (*tCoopOccupied)(uint8_t);
+        typedef bool (*tCoopSwitch)(uint8_t);
+
+        auto fnActive = reinterpret_cast<tCoopActive>(GetProcAddress(hCoop, "CrimsonCoop_IsMultiplayerActive"));
+        auto fnOccupied = reinterpret_cast<tCoopOccupied>(GetProcAddress(hCoop, "CrimsonCoop_IsCharacterOccupied"));
+        auto fnSwitch = reinterpret_cast<tCoopSwitch>(GetProcAddress(hCoop, "CrimsonCoop_RequestCharacterSwitch"));
+
+        if (fnActive && fnActive()) {
+            uint8_t cid = (targetChar == CharacterType::Kliff) ? 1 : ((targetChar == CharacterType::Damiane) ? 2 : 3);
+            if (fnOccupied && fnOccupied(cid)) {
+                outMessage = std::string(CharacterToString(targetChar)) + " is currently piloted by a co-op peer!";
+                Logger::Log("[SwitchManager] [CrimsonCoop Interop] Blocked switch: %s\n", outMessage.c_str());
+                return false;
+            }
+            if (fnSwitch) {
+                fnSwitch(cid);
+                Logger::Log("[SwitchManager] [CrimsonCoop Interop] Notified CrimsonCoop session of switch to %s.\n",
+                            CharacterToString(targetChar));
+            }
+        }
     }
 
     if (m_isMock) {

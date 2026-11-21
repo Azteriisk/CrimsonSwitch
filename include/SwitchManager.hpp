@@ -3,6 +3,7 @@
 #include "Common.hpp"
 #include <string>
 #include <mutex>
+#include <functional>
 
 namespace CrimsonSwitch {
 
@@ -38,6 +39,7 @@ public:
 
     // Direct mock simulation for offline testing
     void SetupMockEnvironment(uintptr_t mockUserActor, uintptr_t mockSubMgr, uintptr_t mockKliff);
+    void SetCoopArbitrationMock(std::function<bool(CharacterType)> isOccupiedFn);
 
 private:
     SwitchManager() = default;
@@ -47,6 +49,7 @@ private:
     SwitchStatus m_status{};
     uintptr_t m_actorManagerGlobal{0};
     bool m_isMock{false};
+    std::function<bool(CharacterType)> m_mockCoopArbitration{nullptr};
 };
 
 } // namespace CrimsonSwitch

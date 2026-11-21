@@ -67,6 +67,25 @@ int main() {
     std::cout << "  -> Attempt switch to Kliff while already Kliff: " 
               << (redundantResult ? "ALLOWED" : "BLOCKED") << " (" << switchMsg << ")\n";
 
+    // 7. Test CrimsonCoop Interoperability & Character Arbitration Guard
+    std::cout << "\n[7] Verifying CrimsonCoop Interoperability & Arbitration Guard...\n";
+    // Simulate CrimsonCoop active session where peer is piloting Damiane
+    mgr.SetCoopArbitrationMock([](CharacterType ct) {
+        return ct == CharacterType::Damiane; // Damiane occupied by peer!
+    });
+
+    std::string coopSwitchMsg;
+    bool coopSwitchResult = mgr.SwitchToCharacter(CharacterType::Damiane, coopSwitchMsg);
+    std::cout << "  -> Attempt switch to peer's character (Damiane): " 
+              << (coopSwitchResult ? "UNEXPECTEDLY ALLOWED" : "SUCCESSFULLY BLOCKED") << " (" << coopSwitchMsg << ")\n";
+
+    // Attempt switch to unoccupied reserve hero (Oongka)
+    bool reserveSwitchResult = mgr.SwitchToCharacter(CharacterType::Oongka, coopSwitchMsg);
+    std::cout << "  -> Attempt switch to unoccupied reserve hero (Oongka): " 
+              << (reserveSwitchResult ? "SUCCESSFULLY ALLOWED" : "FAILED") << " (" << coopSwitchMsg << ")\n";
+
+    mgr.SetCoopArbitrationMock(nullptr); // Reset mock
+
     std::cout << "\n=========================================================\n";
     std::cout << "  All CrimsonSwitch Subsystems Verified Successfully!    \n";
     std::cout << "=========================================================\n";
