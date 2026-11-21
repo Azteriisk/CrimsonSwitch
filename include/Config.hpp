@@ -13,10 +13,12 @@ struct SwitchConfig {
     bool spawnMissingCompanions{true};
 
     // [Hotkeys]
-    uint32_t keyKliff{0x31};     // '1' Key
-    uint32_t keyDamiane{0x32};   // '2' Key
-    uint32_t keyOongka{0x33};    // '3' Key
-    uint32_t keyCycleNext{0x09}; // TAB Key
+    bool requireModifier{true};   // Requires modifier key so normal 1/2/3/Tab gameplay actions are never stolen
+    uint32_t modifierKey{0x12};   // VK_MENU (ALT = 0x12, CTRL = 0x11, SHIFT = 0x10)
+    uint32_t keyKliff{0x31};      // '1' Key (Alt + 1)
+    uint32_t keyDamiane{0x32};    // '2' Key (Alt + 2)
+    uint32_t keyOongka{0x33};     // '3' Key (Alt + 3)
+    uint32_t keyCycleNext{0x43};  // 'C' Key (Alt + C) avoids Windows Alt+Tab conflict
 
     // [Advanced]
     bool debugLogging{true};

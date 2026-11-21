@@ -11,11 +11,13 @@
 ## Features
 
 * **Instant Prologue Unlock:** Overrides the BlackSpace Engine character unlock bitmask (`0x0E`), immediately activating Damiane and Oongka on the in-game radial wheel.
-* **Direct 1-Key Hotkey Swapping:** Switch heroes instantly without opening radial menus:
-  * `[1]` $\rightarrow$ Switch to **Kliff**
-  * `[2]` $\rightarrow$ Switch to **Damiane**
-  * `[3]` $\rightarrow$ Switch to **Oongka**
-  * `[TAB]` $\rightarrow$ Cycle to Next Mercenary
+* **Direct Hotkey Swapping (Gameplay Actions Protected):** Switch heroes instantly without interfering with combat keys (1/2/3 potions, Tab lock-on):
+  * `[Alt + 1]` $\rightarrow$ Switch to **Kliff**
+  * `[Alt + 2]` $\rightarrow$ Switch to **Damiane**
+  * `[Alt + 3]` $\rightarrow$ Switch to **Oongka**
+  * `[Alt + C]` $\rightarrow$ Cycle to Next Mercenary
+  *(Configurable to dedicated Function keys F6–F9 or Numpad 1–3 in `CrimsonSwitch.ini`)*
+* **Native In-Game Radial Wheel Unlocked:** Controller and keyboard players can also switch anytime using the native in-game radial wheel (holding `C` or Gamepad D-pad).
 * **Zero-Footprint Standalone Launcher (`CrimsonSwitchLauncher.exe`):**
   * Never touches base game files on disk.
   * Injects purely into RAM for your play session.

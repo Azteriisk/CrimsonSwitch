@@ -18,7 +18,8 @@ int main() {
     Config::Load("CrimsonSwitch.ini");
     const auto& cfg = Config::Get();
     std::cout << "  -> Unlock All From Start: " << (cfg.unlockAllFromStart ? "ENABLED" : "DISABLED") << "\n";
-    std::cout << "  -> Direct Hotkeys: [1] Kliff, [2] Damiane, [3] Oongka, [TAB] Cycle\n";
+    std::cout << "  -> Direct Hotkeys: [Alt+1] Kliff, [Alt+2] Damiane, [Alt+3] Oongka, [Alt+C] Cycle (Modifier: "
+              << (cfg.requireModifier ? "REQUIRED - Game Actions Protected" : "NONE") << ")\n";
 
     // 2. Character Enum & Codename Verification
     std::cout << "\n[2] Verifying Mercenary Codename & Appearance Paths...\n";

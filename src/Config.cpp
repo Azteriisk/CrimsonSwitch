@@ -46,10 +46,12 @@ bool Config::Load(const std::string& configPath) {
                 if (key == "EnableDirectHotkeys")   s_config.enableDirectHotkeys = (val == "true" || val == "1");
                 if (key == "SpawnMissingCompanions")s_config.spawnMissingCompanions = (val == "true" || val == "1");
             } else if (currentSection == "Hotkeys") {
-                if (key == "KeyKliff")     s_config.keyKliff = std::stoul(val, nullptr, 0);
-                if (key == "KeyDamiane")   s_config.keyDamiane = std::stoul(val, nullptr, 0);
-                if (key == "KeyOongka")    s_config.keyOongka = std::stoul(val, nullptr, 0);
-                if (key == "KeyCycleNext") s_config.keyCycleNext = std::stoul(val, nullptr, 0);
+                if (key == "RequireModifier")  s_config.requireModifier = (val == "true" || val == "1");
+                if (key == "ModifierKey")      s_config.modifierKey = std::stoul(val, nullptr, 0);
+                if (key == "KeyKliff")         s_config.keyKliff = std::stoul(val, nullptr, 0);
+                if (key == "KeyDamiane")       s_config.keyDamiane = std::stoul(val, nullptr, 0);
+                if (key == "KeyOongka")        s_config.keyOongka = std::stoul(val, nullptr, 0);
+                if (key == "KeyCycleNext")     s_config.keyCycleNext = std::stoul(val, nullptr, 0);
             } else if (currentSection == "Advanced") {
                 if (key == "DebugLogging")    s_config.debugLogging = (val == "true" || val == "1");
                 if (key == "AllocateConsole") s_config.allocateConsole = (val == "true" || val == "1");
@@ -75,7 +77,11 @@ bool Config::Save(const std::string& configPath) {
     file << "SpawnMissingCompanions = " << (s_config.spawnMissingCompanions ? "true" : "false") << "\n\n";
 
     file << "[Hotkeys]\n";
-    file << "; Key codes in hex (0x31 = '1', 0x32 = '2', 0x33 = '3', 0x09 = TAB)\n";
+    file << "; RequireModifier prevents colliding with standard gameplay actions (1/2/3 items, Tab lock-on)\n";
+    file << "; ModifierKey: 0x12 = ALT, 0x11 = CTRL, 0x10 = SHIFT, 0x00 = None\n";
+    file << "RequireModifier = " << (s_config.requireModifier ? "true" : "false") << "\n";
+    file << "ModifierKey = 0x" << std::hex << s_config.modifierKey << std::dec << "\n";
+    file << "; Key codes: 0x31 = '1', 0x32 = '2', 0x33 = '3', 0x43 = 'C'\n";
     file << "KeyKliff = 0x" << std::hex << s_config.keyKliff << std::dec << "\n";
     file << "KeyDamiane = 0x" << std::hex << s_config.keyDamiane << std::dec << "\n";
     file << "KeyOongka = 0x" << std::hex << s_config.keyOongka << std::dec << "\n";
