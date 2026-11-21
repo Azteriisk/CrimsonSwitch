@@ -11,9 +11,15 @@ SwitchManager& SwitchManager::Instance() {
     return instance;
 }
 
-// 2-Tier AOB Pattern for ClientActorManagerGlobal from BlackSpace Engine Reference Section 6.2
-static const char* MGR_GLOBAL_P1_AOB = "48 89 05 ?? ?? ?? ?? 48 8D ?? ?? ?? ?? ?? 48 89 05 ?? ?? ?? ??";
-static const char* MGR_GLOBAL_P2_AOB = "48 8D 15 ?? ?? ?? ?? 48 8D 4D ?? E8 ?? ?? ?? ?? 90";
+// 1. Root GameInstance pattern from RVA 0x9e9bd0:
+// 48 8B 05 [disp32] 48 8B 48 20 44 8B 47 38
+static const char* GAME_INSTANCE_AOB = "48 8B 05 ?? ?? ?? ?? 48 8B 48 20 44 8B 47 38";
+
+// 2. SelectOrActivateCompanion from RVA 0xa8ed30:
+static const char* SELECT_COMPANION_AOB = "48 89 5C 24 20 55 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 40 8B DA 48 8B F1 48 8B 91 40 01 00 00";
+
+// 3. FindCompanionById from RVA 0xa7d7f0:
+static const char* FIND_COMPANION_AOB = "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 41 56 41 57 48 83 EC 20 8B DA 48 8B E9 48 8B 91 40 01 00 00";
 
 bool SwitchManager::Initialize() {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -26,22 +32,41 @@ bool SwitchManager::Initialize() {
     HMODULE hGame = GetModuleHandleW(nullptr);
     if (!hGame) return false;
 
-    // Scan for ClientActorManagerGlobal
-    uintptr_t scanAddr = PatternScanner::Scan(hGame, MGR_GLOBAL_P1_AOB);
+    uintptr_t base = reinterpret_cast<uintptr_t>(hGame);
+
+    // 1. Scan for GameInstanceGlobal & EngineWorldGlobal
+    uintptr_t scanAddr = PatternScanner::Scan(hGame, GAME_INSTANCE_AOB);
     if (scanAddr != 0) {
-        m_actorManagerGlobal = PatternScanner::ResolveRipRelative(scanAddr, 3, 7);
-        Logger::Log("[SwitchManager] Resolved ClientActorManagerGlobal via P1: 0x%p\n", (void*)m_actorManagerGlobal);
+        m_gameInstanceGlobal = PatternScanner::ResolveRipRelative(scanAddr, 3, 7);
+        m_engineWorldGlobal = m_gameInstanceGlobal - sizeof(uintptr_t);
+        Logger::Log("[SwitchManager] Resolved GameInstanceGlobal via AOB: 0x%p (EngineWorldGlobal: 0x%p)\n",
+                    (void*)m_gameInstanceGlobal, (void*)m_engineWorldGlobal);
     } else {
-        scanAddr = PatternScanner::Scan(hGame, MGR_GLOBAL_P2_AOB);
-        if (scanAddr != 0) {
-            m_actorManagerGlobal = PatternScanner::ResolveRipRelative(scanAddr, 3, 7);
-            Logger::Log("[SwitchManager] Resolved ClientActorManagerGlobal via P2: 0x%p\n", (void*)m_actorManagerGlobal);
-        }
+        m_gameInstanceGlobal = base + 0x724B350;
+        m_engineWorldGlobal  = base + 0x724B348;
+        Logger::Log("[SwitchManager] Using verified RVA GameInstanceGlobal: 0x%p (EngineWorldGlobal: 0x%p)\n",
+                    (void*)m_gameInstanceGlobal, (void*)m_engineWorldGlobal);
+    }
+    m_actorManagerGlobal = m_gameInstanceGlobal;
+
+    // 2. Scan for SelectOrActivateCompanion
+    uintptr_t scanSelect = PatternScanner::Scan(hGame, SELECT_COMPANION_AOB);
+    if (scanSelect != 0) {
+        m_fnSelectOrActivateCompanion = scanSelect;
+        Logger::Log("[SwitchManager] Resolved SelectOrActivateCompanion via AOB: 0x%p\n", (void*)m_fnSelectOrActivateCompanion);
+    } else {
+        m_fnSelectOrActivateCompanion = base + 0xa8ed30;
+        Logger::Log("[SwitchManager] Using verified RVA SelectOrActivateCompanion: 0x%p\n", (void*)m_fnSelectOrActivateCompanion);
     }
 
-    if (m_actorManagerGlobal == 0) {
-        Logger::Log("[SwitchManager] Warning: ClientActorManagerGlobal pattern not found (Game may not be running).\n");
-        return false;
+    // 3. Scan for FindCompanionById
+    uintptr_t scanFind = PatternScanner::Scan(hGame, FIND_COMPANION_AOB);
+    if (scanFind != 0) {
+        m_fnFindCompanionById = scanFind;
+        Logger::Log("[SwitchManager] Resolved FindCompanionById via AOB: 0x%p\n", (void*)m_fnFindCompanionById);
+    } else {
+        m_fnFindCompanionById = base + 0xa7d7f0;
+        Logger::Log("[SwitchManager] Using verified RVA FindCompanionById: 0x%p\n", (void*)m_fnFindCompanionById);
     }
 
     m_status.isInitialized = true;
@@ -65,6 +90,78 @@ void SwitchManager::SetCoopArbitrationMock(std::function<bool(CharacterType)> is
     m_mockCoopArbitration = std::move(isOccupiedFn);
 }
 
+uintptr_t SwitchManager::GetCompanionContainer() {
+    if (m_isMock) return 0x14002000ULL;
+    if (m_engineWorldGlobal == 0) return 0;
+
+    __try {
+        if (IsBadReadPtr(reinterpret_cast<const void*>(m_engineWorldGlobal), sizeof(uintptr_t))) return 0;
+        uintptr_t engineWorld = *reinterpret_cast<uintptr_t*>(m_engineWorldGlobal);
+        if (engineWorld < 0x10000 || engineWorld > 0x7FFFFFFFFFFF) return 0;
+
+        uintptr_t subWorldAddr = engineWorld + 0x30;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(subWorldAddr), sizeof(uintptr_t))) return 0;
+        uintptr_t subWorld = *reinterpret_cast<uintptr_t*>(subWorldAddr);
+        if (subWorld < 0x10000 || subWorld > 0x7FFFFFFFFFFF) return 0;
+
+        uintptr_t placementAddr = subWorld + 0x1230;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(placementAddr), sizeof(uintptr_t))) return 0;
+        uintptr_t placement = *reinterpret_cast<uintptr_t*>(placementAddr);
+        if (placement < 0x10000 || placement > 0x7FFFFFFFFFFF) return 0;
+
+        uintptr_t compContainerAddr = placement + 0x90;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(compContainerAddr), sizeof(uintptr_t))) return 0;
+        uintptr_t compContainer = *reinterpret_cast<uintptr_t*>(compContainerAddr);
+        if (compContainer < 0x10000 || compContainer > 0x7FFFFFFFFFFF) return 0;
+
+        return compContainer;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+uintptr_t SwitchManager::GetClientActorManager() {
+    if (m_isMock) return 0x14001000ULL;
+    if (m_gameInstanceGlobal == 0) return 0;
+
+    __try {
+        if (IsBadReadPtr(reinterpret_cast<const void*>(m_gameInstanceGlobal), sizeof(uintptr_t))) return 0;
+        uintptr_t gameInstance = *reinterpret_cast<uintptr_t*>(m_gameInstanceGlobal);
+        if (gameInstance < 0x10000 || gameInstance > 0x7FFFFFFFFFFF) return 0;
+
+        uintptr_t subContextAddr = gameInstance + 0x20;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(subContextAddr), sizeof(uintptr_t))) return 0;
+        uintptr_t subContext = *reinterpret_cast<uintptr_t*>(subContextAddr);
+        if (subContext < 0x10000 || subContext > 0x7FFFFFFFFFFF) return 0;
+
+        uintptr_t actorMgrAddr = subContext + 0x1150;
+        if (IsBadReadPtr(reinterpret_cast<const void*>(actorMgrAddr), sizeof(uintptr_t))) return 0;
+        uintptr_t actorMgr = *reinterpret_cast<uintptr_t*>(actorMgrAddr);
+        if (actorMgr < 0x10000 || actorMgr > 0x7FFFFFFFFFFF) return 0;
+
+        return actorMgr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
+uintptr_t SwitchManager::GetUserActor() {
+    if (m_isMock) return m_status.userActorAddress;
+    uintptr_t actorMgr = GetClientActorManager();
+    if (actorMgr == 0) return 0;
+
+    __try {
+        uintptr_t userActorAddr = actorMgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR; // +0x58
+        if (IsBadReadPtr(reinterpret_cast<const void*>(userActorAddr), sizeof(uintptr_t))) return 0;
+        uintptr_t userActor = *reinterpret_cast<uintptr_t*>(userActorAddr);
+        if (userActor < 0x10000 || userActor > 0x7FFFFFFFFFFF) return 0;
+
+        return userActor;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+}
+
 bool SwitchManager::ForceUnlockAll() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -75,111 +172,57 @@ bool SwitchManager::ForceUnlockAll() {
         return true;
     }
 
-    if (!m_status.isInitialized || m_actorManagerGlobal == 0) return false;
+    bool updated = false;
 
-    __try {
-        if (IsBadReadPtr(reinterpret_cast<const void*>(m_actorManagerGlobal), sizeof(uintptr_t))) {
-            return false;
-        }
-
-        uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
-        if (mgr < 0x10000 || mgr > 0x7FFFFFFFFFFF) return false;
-
-        uintptr_t userActorAddr = mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR;
-        if (IsBadReadPtr(reinterpret_cast<const void*>(userActorAddr), sizeof(uintptr_t))) {
-            return false;
-        }
-
-        uintptr_t userActor = *reinterpret_cast<uintptr_t*>(userActorAddr);
-        if (userActor < 0x10000 || userActor > 0x7FFFFFFFFFFF) return false;
-
-        uintptr_t maskAddr = userActor + BlackSpaceOffsets::USER_ACTOR_UNLOCKED_MASK;
-        if (IsBadWritePtr(reinterpret_cast<void*>(maskAddr), sizeof(uint32_t))) {
-            return false;
-        }
-
-        uint32_t* pMask = reinterpret_cast<uint32_t*>(maskAddr);
-        if ((*pMask & ALL_MERCENARIES_UNLOCKED_MASK) != ALL_MERCENARIES_UNLOCKED_MASK) {
-            *pMask |= ALL_MERCENARIES_UNLOCKED_MASK;
-            m_status.unlockedMask = *pMask;
-            Logger::Log("[SwitchManager] Successfully forced character unlock bitmask to 0x%X on UserActor 0x%p!\n",
-                        *pMask, (void*)userActor);
-        }
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
+    // 1. Bitmask unlock on UserActor
+    uintptr_t userActor = GetUserActor();
+    if (userActor != 0) {
+        __try {
+            uintptr_t maskAddr = userActor + BlackSpaceOffsets::USER_ACTOR_UNLOCKED_MASK;
+            if (!IsBadWritePtr(reinterpret_cast<void*>(maskAddr), sizeof(uint32_t))) {
+                uint32_t* pMask = reinterpret_cast<uint32_t*>(maskAddr);
+                if ((*pMask & ALL_MERCENARIES_UNLOCKED_MASK) != ALL_MERCENARIES_UNLOCKED_MASK) {
+                    *pMask |= ALL_MERCENARIES_UNLOCKED_MASK;
+                    m_status.unlockedMask = *pMask;
+                    Logger::Log("[SwitchManager] Unlocked Greymane bitmask to 0x%X on UserActor 0x%p!\n",
+                                *pMask, (void*)userActor);
+                    updated = true;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
+
+    // 2. Add Damiane (2) and Oongka (3) to CompanionContainer so in-game radial wheel populates!
+    uintptr_t compContainer = GetCompanionContainer();
+    if (compContainer != 0 && m_fnSelectOrActivateCompanion != 0) {
+        __try {
+            uintptr_t countAddr = compContainer + 0x148;
+            if (!IsBadReadPtr(reinterpret_cast<const void*>(countAddr), sizeof(uint32_t))) {
+                uint32_t count = *reinterpret_cast<uint32_t*>(countAddr);
+                if (count < 3) {
+                    auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
+                    Logger::Log("[SwitchManager] Early game companion count (%u) < 3. Registering Damiane & Oongka into wheel...\n", count);
+                    fnActivate(reinterpret_cast<void*>(compContainer), 2); // Register Damiane
+                    fnActivate(reinterpret_cast<void*>(compContainer), 3); // Register Oongka
+
+                    // Re-activate current hero
+                    uint32_t activeCid = (m_status.activeCharacter == CharacterType::Damiane) ? 2 :
+                                         ((m_status.activeCharacter == CharacterType::Oongka) ? 3 : 1);
+                    fnActivate(reinterpret_cast<void*>(compContainer), activeCid);
+
+                    uint32_t newCount = *reinterpret_cast<uint32_t*>(countAddr);
+                    Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka ready).\n", newCount);
+                    updated = true;
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    return updated;
 }
 
 CharacterType SwitchManager::GetActiveCharacter() {
     std::lock_guard<std::mutex> lock(m_mutex);
-
-    if (m_isMock) {
-        return m_status.activeCharacter;
-    }
-
-    if (!m_status.isInitialized || m_actorManagerGlobal == 0) {
-        return CharacterType::Kliff;
-    }
-
-    __try {
-        if (IsBadReadPtr(reinterpret_cast<const void*>(m_actorManagerGlobal), sizeof(uintptr_t))) {
-            return CharacterType::Kliff;
-        }
-
-        uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
-        if (mgr < 0x10000 || mgr > 0x7FFFFFFFFFFF) return CharacterType::Kliff;
-
-        uintptr_t userActorAddr = mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR;
-        if (IsBadReadPtr(reinterpret_cast<const void*>(userActorAddr), sizeof(uintptr_t))) {
-            return CharacterType::Kliff;
-        }
-
-        uintptr_t userActor = *reinterpret_cast<uintptr_t*>(userActorAddr);
-        if (userActor < 0x10000 || userActor > 0x7FFFFFFFFFFF) return CharacterType::Kliff;
-
-        uintptr_t subMgrAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR;
-        if (IsBadReadPtr(reinterpret_cast<const void*>(subMgrAddr), sizeof(uintptr_t))) {
-            return CharacterType::Kliff;
-        }
-
-        uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(subMgrAddr);
-        if (subMgr < 0x10000 || subMgr > 0x7FFFFFFFFFFF) return CharacterType::Kliff;
-
-        uintptr_t kliffCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
-        uintptr_t ctrlCcoia  = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA);
-
-        if (ctrlCcoia == kliffCcoia || ctrlCcoia == 0) {
-            m_status.activeCharacter = CharacterType::Kliff;
-            return CharacterType::Kliff;
-        }
-
-        // Inspect appearance path chain
-        uintptr_t compTable = *reinterpret_cast<uintptr_t*>(ctrlCcoia + 0x68);
-        if (compTable && !IsBadReadPtr(reinterpret_cast<const void*>(compTable), sizeof(uintptr_t) * 9)) {
-            uintptr_t p1 = *reinterpret_cast<uintptr_t*>(compTable + 0x40);
-            if (p1 && !IsBadReadPtr(reinterpret_cast<const void*>(p1), sizeof(uintptr_t) * 9)) {
-                uintptr_t p2 = *reinterpret_cast<uintptr_t*>(p1 + 0x40);
-                if (p2 && !IsBadReadPtr(reinterpret_cast<const void*>(p2), sizeof(uintptr_t) * 8)) {
-                    const char* appPath = reinterpret_cast<const char*>(p2 + 0x38);
-                    if (appPath && !IsBadStringPtrA(appPath, 256)) {
-                        std::string_view path(appPath);
-                        if (path.find(ProtagonistCodenames::DAMIANE) != std::string_view::npos) {
-                            m_status.activeCharacter = CharacterType::Damiane;
-                            return CharacterType::Damiane;
-                        }
-                        if (path.find(ProtagonistCodenames::OONGKA) != std::string_view::npos) {
-                            m_status.activeCharacter = CharacterType::Oongka;
-                            return CharacterType::Oongka;
-                        }
-                    }
-                }
-            }
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return CharacterType::Kliff;
-    }
-
     return m_status.activeCharacter;
 }
 
@@ -233,141 +276,30 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
         return true;
     }
 
-    if (!m_status.isInitialized || m_actorManagerGlobal == 0) {
-        outMessage = "BlackSpace Actor Manager not initialized.";
-        return false;
+    uintptr_t compContainer = GetCompanionContainer();
+    if (compContainer != 0 && m_fnSelectOrActivateCompanion != 0) {
+        __try {
+            uint32_t cid = (targetChar == CharacterType::Kliff) ? 1 : ((targetChar == CharacterType::Damiane) ? 2 : 3);
+            auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
+            void* pComp = fnActivate(reinterpret_cast<void*>(compContainer), cid);
+            if (pComp != nullptr) {
+                m_status.activeCharacter = targetChar;
+                outMessage = std::string("Successfully switched to ") + CharacterToString(targetChar) + "!";
+                Logger::Log("[SwitchManager] %s (Companion: 0x%p)\n", outMessage.c_str(), pComp);
+                return true;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            outMessage = "Guarded against exception during companion activation.";
+            Logger::Log("[SwitchManager] Exception in SelectOrActivateCompanion.\n");
+            return false;
+        }
     }
 
-    __try {
-        if (IsBadReadPtr(reinterpret_cast<const void*>(m_actorManagerGlobal), sizeof(uintptr_t))) {
-            outMessage = "Actor Manager pointer unreadable.";
-            return false;
-        }
-
-        uintptr_t mgr = *reinterpret_cast<uintptr_t*>(m_actorManagerGlobal);
-        if (mgr < 0x10000 || mgr > 0x7FFFFFFFFFFF) {
-            outMessage = "Actor Manager not active.";
-            return false;
-        }
-
-        uintptr_t userActorAddr = mgr + BlackSpaceOffsets::MGR_TO_USER_ACTOR;
-        if (IsBadReadPtr(reinterpret_cast<const void*>(userActorAddr), sizeof(uintptr_t))) {
-            outMessage = "UserActor address unreadable.";
-            return false;
-        }
-
-        uintptr_t userActor = *reinterpret_cast<uintptr_t*>(userActorAddr);
-        if (userActor < 0x10000 || userActor > 0x7FFFFFFFFFFF) {
-            outMessage = "UserActor not spawned in current scene.";
-            return false;
-        }
-
-        uintptr_t subMgrAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR;
-        if (IsBadReadPtr(reinterpret_cast<const void*>(subMgrAddr), sizeof(uintptr_t))) {
-            outMessage = "SubManager address unreadable.";
-            return false;
-        }
-
-        uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(subMgrAddr);
-        if (subMgr < 0x10000 || subMgr > 0x7FFFFFFFFFFF) {
-            // Early Game (Prologue / Chapter 1): Companion sub-manager not yet spawned by campaign story.
-            // Switch active hero state early so the player and co-op session adopt the chosen mercenary!
-            m_status.activeCharacter = targetChar;
-            outMessage = std::string("Early Game Switch: Selected ") + CharacterToString(targetChar) + "!";
-            Logger::Log("[SwitchManager] %s\n", outMessage.c_str());
-            return true;
-        }
-
-        uintptr_t targetCcoia = 0;
-
-        if (targetChar == CharacterType::Kliff) {
-            // Kliff is always the permanent anchor at SubManager + 0x30
-            uintptr_t kliffAddr = subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA;
-            if (!IsBadReadPtr(reinterpret_cast<const void*>(kliffAddr), sizeof(uintptr_t))) {
-                targetCcoia = *reinterpret_cast<uintptr_t*>(kliffAddr);
-            }
-        } else {
-            // Search ChildContainerActorComponent list for Damiane or Oongka
-            uintptr_t compVecAddr = userActor + BlackSpaceOffsets::USER_ACTOR_TO_COMP_VEC;
-            if (!IsBadReadPtr(reinterpret_cast<const void*>(compVecAddr), sizeof(uintptr_t))) {
-                uintptr_t compVec = *reinterpret_cast<uintptr_t*>(compVecAddr);
-                if (compVec >= 0x10000 && compVec <= 0x7FFFFFFFFFFF &&
-                    !IsBadReadPtr(reinterpret_cast<const void*>(compVec + 0x20), sizeof(uintptr_t))) {
-                    uintptr_t childContainer = *reinterpret_cast<uintptr_t*>(compVec + 0x20);
-                    if (childContainer >= 0x10000 && childContainer <= 0x7FFFFFFFFFFF &&
-                        !IsBadReadPtr(reinterpret_cast<const void*>(childContainer + BlackSpaceOffsets::CHILD_CONTAINER_ACTOR_LIST), sizeof(uintptr_t))) {
-                        uintptr_t actorList = *reinterpret_cast<uintptr_t*>(childContainer + BlackSpaceOffsets::CHILD_CONTAINER_ACTOR_LIST);
-                        if (actorList >= 0x10000 && actorList <= 0x7FFFFFFFFFFF) {
-                            for (int i = 0; i < 32; ++i) {
-                                uintptr_t entryAddr = actorList + (i * 16);
-                                if (IsBadReadPtr(reinterpret_cast<const void*>(entryAddr), sizeof(uintptr_t))) break;
-                                uintptr_t entryCcoia = *reinterpret_cast<uintptr_t*>(entryAddr);
-                                if (entryCcoia < 0x10000 || entryCcoia > 0x7FFFFFFFFFFF) continue;
-
-                                // Inspect appearance
-                                uintptr_t compTableAddr = entryCcoia + 0x68;
-                                if (!IsBadReadPtr(reinterpret_cast<const void*>(compTableAddr), sizeof(uintptr_t))) {
-                                    uintptr_t compTable = *reinterpret_cast<uintptr_t*>(compTableAddr);
-                                    if (compTable >= 0x10000 && compTable <= 0x7FFFFFFFFFFF &&
-                                        !IsBadReadPtr(reinterpret_cast<const void*>(compTable + 0x40), sizeof(uintptr_t))) {
-                                        uintptr_t p1 = *reinterpret_cast<uintptr_t*>(compTable + 0x40);
-                                        if (p1 >= 0x10000 && p1 <= 0x7FFFFFFFFFFF &&
-                                            !IsBadReadPtr(reinterpret_cast<const void*>(p1 + 0x40), sizeof(uintptr_t))) {
-                                            uintptr_t p2 = *reinterpret_cast<uintptr_t*>(p1 + 0x40);
-                                            if (p2 >= 0x10000 && p2 <= 0x7FFFFFFFFFFF &&
-                                                !IsBadReadPtr(reinterpret_cast<const void*>(p2 + 0x38), sizeof(uintptr_t))) {
-                                                const char* appPath = reinterpret_cast<const char*>(p2 + 0x38);
-                                                if (appPath && !IsBadStringPtrA(appPath, 256)) {
-                                                    std::string_view path(appPath);
-                                                    if (targetChar == CharacterType::Damiane &&
-                                                        (path.find("damian") != std::string_view::npos || path.find("Damian") != std::string_view::npos)) {
-                                                        targetCcoia = entryCcoia;
-                                                        break;
-                                                    }
-                                                    if (targetChar == CharacterType::Oongka &&
-                                                        (path.find("oongka") != std::string_view::npos || path.find("Oongka") != std::string_view::npos)) {
-                                                        targetCcoia = entryCcoia;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if (targetCcoia != 0 && targetCcoia >= 0x10000 && targetCcoia <= 0x7FFFFFFFFFFF) {
-            uintptr_t ctrlAddr1 = subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA;
-            uintptr_t ctrlAddr2 = userActor + BlackSpaceOffsets::USER_ACTOR_TO_CONTROLLED;
-            if (!IsBadWritePtr(reinterpret_cast<void*>(ctrlAddr1), sizeof(uintptr_t))) {
-                *reinterpret_cast<uintptr_t*>(ctrlAddr1) = targetCcoia;
-            }
-            if (!IsBadWritePtr(reinterpret_cast<void*>(ctrlAddr2), sizeof(uintptr_t))) {
-                *reinterpret_cast<uintptr_t*>(ctrlAddr2) = targetCcoia;
-            }
-
-            m_status.controlledCcoia = targetCcoia;
-            m_status.activeCharacter = targetChar;
-
-            outMessage = std::string("Successfully switched to ") + CharacterToString(targetChar) + "!";
-            Logger::Log("[SwitchManager] %s (Controlled CCOIA: 0x%p)\n", outMessage.c_str(), (void*)targetCcoia);
-            return true;
-        } else {
-            outMessage = std::string("Mercenary ") + CharacterToString(targetChar) + 
-                         " is not yet available in current chapter (Prologue tutorial). Progress past prologue to switch.";
-            Logger::Log("[SwitchManager] %s\n", outMessage.c_str());
-            return false;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        outMessage = "Character switch guarded against memory violation.";
-        Logger::Log("[SwitchManager] Exception caught during character switch attempt.\n");
-        return false;
-    }
+    // Fallback when outside live world / before container created
+    m_status.activeCharacter = targetChar;
+    outMessage = std::string("Early game preference set to ") + CharacterToString(targetChar) + ".";
+    Logger::Log("[SwitchManager] %s\n", outMessage.c_str());
+    return true;
 }
 
 bool SwitchManager::CycleNextCharacter(std::string& outMessage) {

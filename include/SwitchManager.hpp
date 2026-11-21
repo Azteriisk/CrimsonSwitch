@@ -30,6 +30,13 @@ public:
     CharacterType GetActiveCharacter();
     SwitchStatus GetStatus();
 
+    // Engine resolution helpers
+    uintptr_t GetCompanionContainer();
+    uintptr_t GetUserActor();
+    uintptr_t GetClientActorManager();
+    uintptr_t GetSelectOrActivateFunction() const { return m_fnSelectOrActivateCompanion; }
+    uintptr_t GetFindCompanionFunction() const { return m_fnFindCompanionById; }
+
     // Force character unlock bitmask on UserActor (Unlocks radial wheel)
     bool ForceUnlockAll();
 
@@ -47,7 +54,11 @@ private:
 
     mutable std::mutex m_mutex;
     SwitchStatus m_status{};
+    uintptr_t m_gameInstanceGlobal{0};
+    uintptr_t m_engineWorldGlobal{0};
     uintptr_t m_actorManagerGlobal{0};
+    uintptr_t m_fnSelectOrActivateCompanion{0};
+    uintptr_t m_fnFindCompanionById{0};
     bool m_isMock{false};
     std::function<bool(CharacterType)> m_mockCoopArbitration{nullptr};
 };
