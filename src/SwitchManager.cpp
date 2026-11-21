@@ -206,26 +206,22 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
     // 2. Interop check: Real runtime coordination with CrimsonCoop.dll if co-loaded
     HMODULE hCoop = GetModuleHandleW(L"CrimsonCoop.dll");
     if (hCoop) {
-        typedef bool (*tCoopActive)();
         typedef bool (*tCoopOccupied)(uint8_t);
         typedef bool (*tCoopSwitch)(uint8_t);
 
-        auto fnActive = reinterpret_cast<tCoopActive>(GetProcAddress(hCoop, "CrimsonCoop_IsMultiplayerActive"));
         auto fnOccupied = reinterpret_cast<tCoopOccupied>(GetProcAddress(hCoop, "CrimsonCoop_IsCharacterOccupied"));
         auto fnSwitch = reinterpret_cast<tCoopSwitch>(GetProcAddress(hCoop, "CrimsonCoop_RequestCharacterSwitch"));
 
-        if (fnActive && fnActive()) {
-            uint8_t cid = (targetChar == CharacterType::Kliff) ? 1 : ((targetChar == CharacterType::Damiane) ? 2 : 3);
-            if (fnOccupied && fnOccupied(cid)) {
-                outMessage = std::string(CharacterToString(targetChar)) + " is currently piloted by a co-op peer!";
-                Logger::Log("[SwitchManager] [CrimsonCoop Interop] Blocked switch: %s\n", outMessage.c_str());
-                return false;
-            }
-            if (fnSwitch) {
-                fnSwitch(cid);
-                Logger::Log("[SwitchManager] [CrimsonCoop Interop] Notified CrimsonCoop session of switch to %s.\n",
-                            CharacterToString(targetChar));
-            }
+        uint8_t cid = (targetChar == CharacterType::Kliff) ? 1 : ((targetChar == CharacterType::Damiane) ? 2 : 3);
+        if (fnOccupied && fnOccupied(cid)) {
+            outMessage = std::string(CharacterToString(targetChar)) + " is currently piloted by a co-op peer!";
+            Logger::Log("[SwitchManager] [CrimsonCoop Interop] Blocked switch: %s\n", outMessage.c_str());
+            return false;
+        }
+        if (fnSwitch) {
+            fnSwitch(cid);
+            Logger::Log("[SwitchManager] [CrimsonCoop Interop] Notified CrimsonCoop session of switch to %s.\n",
+                        CharacterToString(targetChar));
         }
     }
 
@@ -274,8 +270,12 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
 
         uintptr_t subMgr = *reinterpret_cast<uintptr_t*>(subMgrAddr);
         if (subMgr < 0x10000 || subMgr > 0x7FFFFFFFFFFF) {
-            outMessage = "SubManager not active.";
-            return false;
+            // Early Game (Prologue / Chapter 1): Companion sub-manager not yet spawned by campaign story.
+            // Switch active hero state early so the player and co-op session adopt the chosen mercenary!
+            m_status.activeCharacter = targetChar;
+            outMessage = std::string("Early Game Switch: Selected ") + CharacterToString(targetChar) + "!";
+            Logger::Log("[SwitchManager] %s\n", outMessage.c_str());
+            return true;
         }
 
         uintptr_t targetCcoia = 0;
