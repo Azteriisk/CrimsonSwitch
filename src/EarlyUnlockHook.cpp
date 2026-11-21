@@ -29,7 +29,7 @@ static tIsCharacterUnlocked oIsCharacterUnlocked = nullptr;
 }
 
 LRESULT CALLBACK EarlyUnlockHook::Hook_WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-    if (uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) {
+    if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && !(lParam & (1 << 30))) {
         const auto& cfg = Config::Get();
         if (cfg.enableDirectHotkeys) {
             bool modifierActive = true;
