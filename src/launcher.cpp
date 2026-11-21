@@ -140,11 +140,40 @@ std::wstring FindModDll() {
     return L"";
 }
 
+// Acquire SeDebugPrivilege to ensure memory operations succeed across integrity levels
+bool EnableDebugPrivilege() {
+    HANDLE hToken = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
+        return false;
+    }
+    TOKEN_PRIVILEGES tp{};
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, L"SeDebugPrivilege", &luid)) {
+        CloseHandle(hToken);
+        return false;
+    }
+    tp.PrivilegeCount = 1;
+    tp.Privileges[0].Luid = luid;
+    tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(TOKEN_PRIVILEGES), nullptr, nullptr);
+    CloseHandle(hToken);
+    return true;
+}
+
 bool InjectDll(HANDLE hProcess, const std::wstring& dllPath) {
     size_t pathSize = (dllPath.length() + 1) * sizeof(wchar_t);
 
     LPVOID pRemoteMem = VirtualAllocEx(hProcess, nullptr, pathSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pRemoteMem) return false;
+    if (!pRemoteMem) {
+        DWORD err = GetLastError();
+        std::wcerr << L"[Error] Failed to allocate memory in game process (Code: " << err << L")\n";
+        if (err == ERROR_ACCESS_DENIED) {
+            std::wcerr << L"Hint: Try running CrimsonSwitchLauncher as Administrator (Right-click -> Run as administrator).\n";
+        } else if (err == ERROR_INVALID_HANDLE) {
+            std::wcerr << L"Hint: Game process handle is invalid or the process already exited.\n";
+        }
+        return false;
+    }
 
     SIZE_T bytesWritten = 0;
     if (!WriteProcessMemory(hProcess, pRemoteMem, dllPath.c_str(), pathSize, &bytesWritten) || bytesWritten != pathSize) {
@@ -188,6 +217,8 @@ bool InjectDll(HANDLE hProcess, const std::wstring& dllPath) {
 } // namespace SwitchLauncher
 
 int main() {
+    SwitchLauncher::EnableDebugPrivilege();
+
     std::cout << "=========================================================\n";
     std::cout << "   Crimson Desert Early Trio Switch Standalone Launcher \n";
     std::cout << "   Instant Switching: Kliff, Damiane, Oongka             \n";
@@ -270,13 +301,47 @@ int main() {
     }
 
     std::cout << "[Launcher] Game process started (PID: " << pi.dwProcessId << "). Initializing...\n";
-    Sleep(2000);
+    Sleep(2500);
 
-    if (SwitchLauncher::InjectDll(pi.hProcess, modDllPath)) {
-        std::cout << "  -> [SUCCESS] Early Trio switch mod active!\n";
-        std::cout << "  -> Direct hotkeys: [1] Kliff, [2] Damiane, [3] Oongka, [TAB] Cycle\n";
+    HANDLE hTargetProcess = pi.hProcess;
+    bool reopened = false;
+    DWORD exitCode = 0;
+    if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode != STILL_ACTIVE) {
+        std::cout << "[Launcher] Steam client handoff detected (PID " << pi.dwProcessId << " exited with code " << exitCode << ").\n";
+        std::cout << "[Launcher] Waiting for main game process to spawn under Steam...\n";
+
+        hTargetProcess = nullptr;
+        for (int i = 0; i < 30; ++i) {
+            Sleep(500);
+            DWORD activePid = SwitchLauncher::FindProcessId(SwitchLauncher::GAME_EXE_NAME);
+            if (activePid != 0 && activePid != pi.dwProcessId) {
+                hTargetProcess = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, activePid);
+                if (hTargetProcess) {
+                    std::wcout << L"[Launcher] Attached to active Crimson Desert process (PID: " << activePid << L")!\n";
+                    reopened = true;
+                    Sleep(2000);
+                    break;
+                }
+            }
+        }
+
+        if (!hTargetProcess) {
+            std::wcerr << L"[Error] Could not locate active game process after Steam handoff.\n";
+            std::cout << "Tip: Launch Crimson Desert through Steam, then double-click CrimsonSwitchLauncher.\n";
+            std::cout << "\nPress ENTER to exit...";
+            std::cin.get();
+            return 1;
+        }
     }
 
+    if (SwitchLauncher::InjectDll(hTargetProcess, modDllPath)) {
+        std::cout << "  -> [SUCCESS] Early Trio switch mod active!\n";
+        std::cout << "  -> Direct hotkeys: [Alt+1] Kliff, [Alt+2] Damiane, [Alt+3] Oongka, [Alt+C] Cycle\n";
+    }
+
+    if (reopened && hTargetProcess) {
+        CloseHandle(hTargetProcess);
+    }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
