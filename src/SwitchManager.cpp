@@ -21,6 +21,9 @@ static const char* SELECT_COMPANION_AOB = "48 89 5C 24 20 55 56 57 41 54 41 55 4
 // 3. FindCompanionById from RVA 0xa7d7f0:
 static const char* FIND_COMPANION_AOB = "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 54 41 55 41 56 41 57 48 83 EC 20 8B DA 48 8B E9 48 8B 91 40 01 00 00";
 
+// 4. SpawnOrUnlockCompanion from RVA 0xa7dc20:
+static const char* SPAWN_COMPANION_AOB = "40 55 53 56 57 41 56 48 8D 6C 24 C9 48 81 EC A0 00 00 00 C5 F8 29 B4 24 90 00 00 00 8B DA 4C 8B F1 33 F6 48 8D 55 DF 48 8B 49 30";
+
 bool SwitchManager::Initialize() {
     std::lock_guard<std::mutex> lock(m_mutex);
 
@@ -67,6 +70,16 @@ bool SwitchManager::Initialize() {
     } else {
         m_fnFindCompanionById = base + 0xa7d7f0;
         Logger::Log("[SwitchManager] Using verified RVA FindCompanionById: 0x%p\n", (void*)m_fnFindCompanionById);
+    }
+
+    // 4. Scan for SpawnOrUnlockCompanion (RVA 0xa7dc20)
+    uintptr_t scanSpawn = PatternScanner::Scan(hGame, SPAWN_COMPANION_AOB);
+    if (scanSpawn != 0) {
+        m_fnSpawnOrUnlockCompanion = scanSpawn;
+        Logger::Log("[SwitchManager] Resolved SpawnOrUnlockCompanion via AOB: 0x%p\n", (void*)m_fnSpawnOrUnlockCompanion);
+    } else {
+        m_fnSpawnOrUnlockCompanion = base + 0xa7dc20;
+        Logger::Log("[SwitchManager] Using verified RVA SpawnOrUnlockCompanion: 0x%p\n", (void*)m_fnSpawnOrUnlockCompanion);
     }
 
     m_status.isInitialized = true;
@@ -199,53 +212,128 @@ bool SwitchManager::ForceUnlockAll() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-    // 2. Add Kliff (1), Damiane (2) and Oongka (3) to CompanionContainer so in-game radial wheel populates!
+    // 2. Discover anchor Kliff actor
+    uintptr_t subMgr = 0;
+    __try {
+        subMgr = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR);
+        if (subMgr != 0) {
+            uintptr_t kliffCcoia = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_KLIFF_CCOIA);
+            if (kliffCcoia != 0) {
+                m_status.kliffCcoia = kliffCcoia;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+
+    // 3. Register and Spawn Damiane & Oongka into CompanionContainer so in-game radial wheel populates!
     if (!m_wheelPopulated && m_fnFindCompanionById != 0) {
         uintptr_t compContainer = GetCompanionContainer();
         if (compContainer != 0) {
             __try {
+                auto fnFind = reinterpret_cast<void* (__fastcall*)(void*, uint32_t, bool)>(m_fnFindCompanionById);
                 uintptr_t countAddr = compContainer + 0x148;
                 if (!IsBadReadPtr(reinterpret_cast<const void*>(countAddr), sizeof(uint32_t))) {
                     uint32_t count = *reinterpret_cast<uint32_t*>(countAddr);
                     Logger::Log("[SwitchManager] In-world CompanionContainer: 0x%p, Initial Count: %u\n", (void*)compContainer, count);
-                    if (count < 3) {
-                        auto fnFindOrAdd = reinterpret_cast<void* (__fastcall*)(void*, uint32_t, bool)>(m_fnFindCompanionById);
+
+                    // Check if definitions manager (+0x30 -> +0x50) is loaded
+                    uintptr_t p30 = *reinterpret_cast<uintptr_t*>(compContainer + 0x30);
+                    uintptr_t p50 = (p30 != 0 && !IsBadReadPtr(reinterpret_cast<const void*>(p30 + 0x50), sizeof(uintptr_t)))
+                                    ? *reinterpret_cast<uintptr_t*>(p30 + 0x50) : 0;
+
+                    if (m_fnSpawnOrUnlockCompanion != 0 && p50 != 0) {
+                        // Bypass the 6-byte progression lock jump at +0x35
+                        uint8_t* pPatch = reinterpret_cast<uint8_t*>(m_fnSpawnOrUnlockCompanion + 0x35);
+                        if (pPatch[0] == 0x0F && pPatch[1] == 0x84) {
+                            DWORD oldProtect;
+                            if (VirtualProtect(pPatch, 6, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                                memset(pPatch, 0x90, 6);
+                                VirtualProtect(pPatch, 6, oldProtect, &oldProtect);
+                                FlushInstructionCache(GetCurrentProcess(), pPatch, 6);
+                                Logger::Log("[SwitchManager] Story progression check at 0x%p bypassed (6 NOPs applied).\n", (void*)pPatch);
+                            }
+                        }
+
+                        auto fnSpawn = reinterpret_cast<void (__fastcall*)(void*, uint32_t)>(m_fnSpawnOrUnlockCompanion);
+
+                        // 1. Ensure Kliff (1) is registered
+                        void* pKliff = fnFind(reinterpret_cast<void*>(compContainer), 1, false);
+                        if (!pKliff) {
+                            pKliff = fnFind(reinterpret_cast<void*>(compContainer), 1, true);
+                        }
+                        if (pKliff) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x30) = 1;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x35) = 0x0101;
+                            if (m_status.kliffCcoia != 0) {
+                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x38) = m_status.kliffCcoia;
+                            }
+                        }
+
+                        // 2. Spawn Damiane (2)
+                        fnSpawn(reinterpret_cast<void*>(compContainer), 2);
+                        void* pDamiane = fnFind(reinterpret_cast<void*>(compContainer), 2, false);
+                        if (pDamiane) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x30) = 1;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x35) = 0x0101;
+                            uintptr_t dActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x38);
+                            if (dActor != 0) {
+                                m_status.damianeCcoia = dActor;
+                                Logger::Log("[SwitchManager] *** DAMIANE CCOIA SPAWNED: 0x%p ***\n", (void*)dActor);
+                            }
+                        }
+
+                        // 3. Spawn Oongka (3)
+                        fnSpawn(reinterpret_cast<void*>(compContainer), 3);
+                        void* pOongka = fnFind(reinterpret_cast<void*>(compContainer), 3, false);
+                        if (pOongka) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x30) = 1;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x35) = 0x0101;
+                            uintptr_t oActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x38);
+                            if (oActor != 0) {
+                                m_status.oongkaCcoia = oActor;
+                                Logger::Log("[SwitchManager] *** OONGKA CCOIA SPAWNED: 0x%p ***\n", (void*)oActor);
+                            }
+                        }
+                    } else if (count < 3) {
                         Logger::Log("[SwitchManager] In-game companion count (%u) < 3. Registering Kliff, Damiane & Oongka into wheel...\n", count);
-                        void* pKliff   = fnFindOrAdd(reinterpret_cast<void*>(compContainer), 1, true);
-                        void* pDamiane = fnFindOrAdd(reinterpret_cast<void*>(compContainer), 2, true);
-                        void* pOongka  = fnFindOrAdd(reinterpret_cast<void*>(compContainer), 3, true);
+                        void* pKliff   = fnFind(reinterpret_cast<void*>(compContainer), 1, true);
+                        void* pDamiane = fnFind(reinterpret_cast<void*>(compContainer), 2, true);
+                        void* pOongka  = fnFind(reinterpret_cast<void*>(compContainer), 3, true);
 
                         if (pKliff) {
                             *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x30) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x34) = 0x0101;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x35) = 0x0101;
                             if (m_status.kliffCcoia != 0) {
                                 *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x38) = m_status.kliffCcoia;
                             }
                         }
                         if (pDamiane) {
                             *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x30) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x34) = 0x0101;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x35) = 0x0101;
                             if (m_status.damianeCcoia != 0) {
                                 *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x38) = m_status.damianeCcoia;
                             }
                         }
                         if (pOongka) {
                             *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x30) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x34) = 0x0101;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x35) = 0x0101;
                             if (m_status.oongkaCcoia != 0) {
                                 *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x38) = m_status.oongkaCcoia;
                             }
                         }
+                    }
 
-                        uint32_t newCount = *reinterpret_cast<uint32_t*>(countAddr);
-                        Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka ready).\n", newCount);
-                        if (newCount >= 3) {
-                            m_wheelPopulated = true;
-                        }
-                        updated = true;
-                    } else {
+                    uint32_t newCount = *reinterpret_cast<uint32_t*>(countAddr);
+                    Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka active).\n", newCount);
+                    if (newCount >= 3) {
                         m_wheelPopulated = true;
                     }
+                    updated = true;
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 Logger::Log("[SwitchManager] Exception guarded in CompanionContainer activation.\n");
@@ -483,12 +571,20 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
     }
 
     uintptr_t targetCcoia = 0;
-    if (targetChar == CharacterType::Kliff) {
-        targetCcoia = m_status.kliffCcoia;
-    } else if (targetChar == CharacterType::Damiane) {
-        targetCcoia = m_status.damianeCcoia;
-    } else if (targetChar == CharacterType::Oongka) {
-        targetCcoia = m_status.oongkaCcoia;
+    if (compContainer != 0 && m_fnFindCompanionById != 0) {
+        __try {
+            auto fnFind = reinterpret_cast<void* (__fastcall*)(void*, uint32_t, bool)>(m_fnFindCompanionById);
+            void* pComp = fnFind(reinterpret_cast<void*>(compContainer), cid, false);
+            if (pComp != nullptr) {
+                targetCcoia = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pComp) + 0x38);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+
+    if (targetCcoia == 0) {
+        if (targetChar == CharacterType::Kliff)        targetCcoia = m_status.kliffCcoia;
+        else if (targetChar == CharacterType::Damiane) targetCcoia = m_status.damianeCcoia;
+        else if (targetChar == CharacterType::Oongka)  targetCcoia = m_status.oongkaCcoia;
     }
 
     // 1. Activate companion in CompanionContainer

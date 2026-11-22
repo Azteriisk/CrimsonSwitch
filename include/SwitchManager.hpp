@@ -36,6 +36,7 @@ public:
     uintptr_t GetClientActorManager();
     uintptr_t GetSelectOrActivateFunction() const { return m_fnSelectOrActivateCompanion; }
     uintptr_t GetFindCompanionFunction() const { return m_fnFindCompanionById; }
+    uintptr_t GetSpawnCompanionFunction() const { return m_fnSpawnOrUnlockCompanion; }
 
     // Force character unlock bitmask on UserActor (Unlocks radial wheel)
     bool ForceUnlockAll();
@@ -60,6 +61,7 @@ private:
     uintptr_t m_actorManagerGlobal{0};
     uintptr_t m_fnSelectOrActivateCompanion{0};
     uintptr_t m_fnFindCompanionById{0};
+    uintptr_t m_fnSpawnOrUnlockCompanion{0};
     bool m_wheelPopulated{false};
     bool m_isMock{false};
     std::function<bool(CharacterType)> m_mockCoopArbitration{nullptr};
