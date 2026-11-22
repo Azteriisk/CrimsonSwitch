@@ -224,8 +224,11 @@ bool SwitchManager::ForceUnlockAll() {
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
 
-    // 3. Register and Spawn Damiane & Oongka into CompanionContainer so in-game radial wheel populates!
-    if (!m_wheelPopulated && m_fnFindCompanionById != 0) {
+    // 3. Spawn Damiane & Oongka into CompanionContainer using the engine's native spawner
+    //    Strategy: Wait for the definitions manager to fully load before calling fnSpawn.
+    //    NEVER create hollow entries via fnFind(id, true) - only fnSpawn creates real actors.
+    //    Only mark m_wheelPopulated once BOTH actors have valid non-null pointers.
+    if (m_fnFindCompanionById != 0) {
         uintptr_t compContainer = GetCompanionContainer();
         if (compContainer != 0) {
             __try {
@@ -233,107 +236,144 @@ bool SwitchManager::ForceUnlockAll() {
                 uintptr_t countAddr = compContainer + 0x148;
                 if (!IsBadReadPtr(reinterpret_cast<const void*>(countAddr), sizeof(uint32_t))) {
                     uint32_t count = *reinterpret_cast<uint32_t*>(countAddr);
-                    Logger::Log("[SwitchManager] In-world CompanionContainer: 0x%p, Initial Count: %u\n", (void*)compContainer, count);
 
-                    // Check if definitions manager (+0x30 -> +0x50) is loaded
-                    uintptr_t p30 = *reinterpret_cast<uintptr_t*>(compContainer + 0x30);
-                    uintptr_t p50 = (p30 != 0 && !IsBadReadPtr(reinterpret_cast<const void*>(p30 + 0x50), sizeof(uintptr_t)))
-                                    ? *reinterpret_cast<uintptr_t*>(p30 + 0x50) : 0;
+                    // Check existing entries for already-spawned actors (e.g. story progression naturally unlocked them)
+                    void* pDamianeEntry = fnFind(reinterpret_cast<void*>(compContainer), 2, false);
+                    void* pOongkaEntry  = fnFind(reinterpret_cast<void*>(compContainer), 3, false);
 
-                    if (m_fnSpawnOrUnlockCompanion != 0 && p50 != 0) {
-                        // Bypass the 6-byte progression lock jump at +0x35
-                        uint8_t* pPatch = reinterpret_cast<uint8_t*>(m_fnSpawnOrUnlockCompanion + 0x35);
-                        if (pPatch[0] == 0x0F && pPatch[1] == 0x84) {
-                            DWORD oldProtect;
-                            if (VirtualProtect(pPatch, 6, PAGE_EXECUTE_READWRITE, &oldProtect)) {
-                                memset(pPatch, 0x90, 6);
-                                VirtualProtect(pPatch, 6, oldProtect, &oldProtect);
-                                FlushInstructionCache(GetCurrentProcess(), pPatch, 6);
-                                Logger::Log("[SwitchManager] Story progression check at 0x%p bypassed (6 NOPs applied).\n", (void*)pPatch);
+                    uintptr_t dActor = 0, oActor = 0;
+                    if (pDamianeEntry) {
+                        dActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x38);
+                    }
+                    if (pOongkaEntry) {
+                        oActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x38);
+                    }
+
+                    // If both actors are already alive, update our cached pointers and mark done
+                    if (dActor != 0 && dActor > 0x10000 && oActor != 0 && oActor > 0x10000) {
+                        if (m_status.damianeCcoia != dActor || m_status.oongkaCcoia != oActor) {
+                            m_status.damianeCcoia = dActor;
+                            m_status.oongkaCcoia  = oActor;
+                            Logger::Log("[SwitchManager] Both companions already alive: Damiane=0x%p Oongka=0x%p\n",
+                                        (void*)dActor, (void*)oActor);
+                        }
+                        // Ensure their radial wheel flags are set
+                        if (pDamianeEntry) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x30) = 1;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x35) = 0x0101;
+                        }
+                        if (pOongkaEntry) {
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x30) = 1;
+                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x34) = 1;
+                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x35) = 0x0101;
+                        }
+                        m_wheelPopulated = true;
+                        updated = true;
+                    }
+                    // Otherwise, attempt to spawn them via the engine's native routine
+                    else if (m_fnSpawnOrUnlockCompanion != 0 && !m_wheelPopulated) {
+                        // Check if the definitions context is ready (+0x30 -> +0x50 must be non-null)
+                        uintptr_t p30 = *reinterpret_cast<uintptr_t*>(compContainer + 0x30);
+                        uintptr_t p50 = 0;
+                        if (p30 != 0 && !IsBadReadPtr(reinterpret_cast<const void*>(p30 + 0x50), sizeof(uintptr_t))) {
+                            p50 = *reinterpret_cast<uintptr_t*>(p30 + 0x50);
+                        }
+
+                        if (p50 == 0) {
+                            // Definitions not ready yet - wait for next tick (1s)
+                            static uint64_t s_lastWaitLog = 0;
+                            uint64_t nowMs = GetTickCount64();
+                            if (nowMs - s_lastWaitLog > 5000) {
+                                Logger::Log("[SwitchManager] Waiting for CompanionContainer definitions to load (p30=0x%p p50=0x%p, count=%u)...\n",
+                                            (void*)p30, (void*)p50, count);
+                                s_lastWaitLog = nowMs;
                             }
-                        }
+                        } else {
+                            Logger::Log("[SwitchManager] Definitions manager ready (p50=0x%p). Spawning companions (count=%u)...\n",
+                                        (void*)p50, count);
 
-                        auto fnSpawn = reinterpret_cast<void (__fastcall*)(void*, uint32_t)>(m_fnSpawnOrUnlockCompanion);
-
-                        // 1. Ensure Kliff (1) is registered
-                        void* pKliff = fnFind(reinterpret_cast<void*>(compContainer), 1, false);
-                        if (!pKliff) {
-                            pKliff = fnFind(reinterpret_cast<void*>(compContainer), 1, true);
-                        }
-                        if (pKliff) {
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x30) = 1;
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x34) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x35) = 0x0101;
-                            if (m_status.kliffCcoia != 0) {
-                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x38) = m_status.kliffCcoia;
+                            // Apply the story progression NOP patch (once)
+                            static bool s_patchApplied = false;
+                            if (!s_patchApplied) {
+                                uint8_t* pPatch = reinterpret_cast<uint8_t*>(m_fnSpawnOrUnlockCompanion + 0x35);
+                                if (!IsBadReadPtr(pPatch, 6) && pPatch[0] == 0x0F && pPatch[1] == 0x84) {
+                                    DWORD oldProtect;
+                                    if (VirtualProtect(pPatch, 6, PAGE_EXECUTE_READWRITE, &oldProtect)) {
+                                        memset(pPatch, 0x90, 6);
+                                        VirtualProtect(pPatch, 6, oldProtect, &oldProtect);
+                                        FlushInstructionCache(GetCurrentProcess(), pPatch, 6);
+                                        Logger::Log("[SwitchManager] Story progression check at 0x%p bypassed (6 NOPs).\n", (void*)pPatch);
+                                    }
+                                }
+                                s_patchApplied = true;
                             }
-                        }
 
-                        // 2. Spawn Damiane (2)
-                        fnSpawn(reinterpret_cast<void*>(compContainer), 2);
-                        void* pDamiane = fnFind(reinterpret_cast<void*>(compContainer), 2, false);
-                        if (pDamiane) {
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x30) = 1;
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x34) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x35) = 0x0101;
-                            uintptr_t dActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x38);
-                            if (dActor != 0) {
+                            auto fnSpawn = reinterpret_cast<void (__fastcall*)(void*, uint32_t)>(m_fnSpawnOrUnlockCompanion);
+
+                            // Ensure Kliff (1) entry exists and has its actor pointer
+                            void* pKliff = fnFind(reinterpret_cast<void*>(compContainer), 1, false);
+                            if (!pKliff) {
+                                fnSpawn(reinterpret_cast<void*>(compContainer), 1);
+                                pKliff = fnFind(reinterpret_cast<void*>(compContainer), 1, false);
+                            }
+                            if (pKliff) {
+                                *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x30) = 1;
+                                *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x34) = 1;
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x35) = 0x0101;
+                                if (m_status.kliffCcoia != 0) {
+                                    *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x38) = m_status.kliffCcoia;
+                                }
+                            }
+
+                            // Spawn Damiane (2)
+                            if (dActor == 0) {
+                                fnSpawn(reinterpret_cast<void*>(compContainer), 2);
+                                pDamianeEntry = fnFind(reinterpret_cast<void*>(compContainer), 2, false);
+                                if (pDamianeEntry) {
+                                    dActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x38);
+                                }
+                            }
+                            if (pDamianeEntry) {
+                                *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x30) = 1;
+                                *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x34) = 1;
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamianeEntry) + 0x35) = 0x0101;
+                            }
+                            if (dActor != 0 && dActor > 0x10000) {
                                 m_status.damianeCcoia = dActor;
                                 Logger::Log("[SwitchManager] *** DAMIANE CCOIA SPAWNED: 0x%p ***\n", (void*)dActor);
+                            } else {
+                                Logger::Log("[SwitchManager] Damiane spawn returned actor=0x%p (will retry next tick)\n", (void*)dActor);
                             }
-                        }
 
-                        // 3. Spawn Oongka (3)
-                        fnSpawn(reinterpret_cast<void*>(compContainer), 3);
-                        void* pOongka = fnFind(reinterpret_cast<void*>(compContainer), 3, false);
-                        if (pOongka) {
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x30) = 1;
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x34) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x35) = 0x0101;
-                            uintptr_t oActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x38);
-                            if (oActor != 0) {
+                            // Spawn Oongka (3)
+                            if (oActor == 0) {
+                                fnSpawn(reinterpret_cast<void*>(compContainer), 3);
+                                pOongkaEntry = fnFind(reinterpret_cast<void*>(compContainer), 3, false);
+                                if (pOongkaEntry) {
+                                    oActor = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x38);
+                                }
+                            }
+                            if (pOongkaEntry) {
+                                *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x30) = 1;
+                                *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x34) = 1;
+                                *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongkaEntry) + 0x35) = 0x0101;
+                            }
+                            if (oActor != 0 && oActor > 0x10000) {
                                 m_status.oongkaCcoia = oActor;
                                 Logger::Log("[SwitchManager] *** OONGKA CCOIA SPAWNED: 0x%p ***\n", (void*)oActor);
+                            } else {
+                                Logger::Log("[SwitchManager] Oongka spawn returned actor=0x%p (will retry next tick)\n", (void*)oActor);
                             }
-                        }
-                    } else if (count < 3) {
-                        Logger::Log("[SwitchManager] In-game companion count (%u) < 3. Registering Kliff, Damiane & Oongka into wheel...\n", count);
-                        void* pKliff   = fnFind(reinterpret_cast<void*>(compContainer), 1, true);
-                        void* pDamiane = fnFind(reinterpret_cast<void*>(compContainer), 2, true);
-                        void* pOongka  = fnFind(reinterpret_cast<void*>(compContainer), 3, true);
 
-                        if (pKliff) {
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x30) = 1;
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x34) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x35) = 0x0101;
-                            if (m_status.kliffCcoia != 0) {
-                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pKliff) + 0x38) = m_status.kliffCcoia;
+                            // Only mark wheel populated if BOTH actors are truly instantiated
+                            if (dActor != 0 && dActor > 0x10000 && oActor != 0 && oActor > 0x10000) {
+                                m_wheelPopulated = true;
+                                Logger::Log("[SwitchManager] *** ALL 3 COMPANIONS FULLY SPAWNED! Wheel populated. ***\n");
                             }
-                        }
-                        if (pDamiane) {
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x30) = 1;
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x34) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x35) = 0x0101;
-                            if (m_status.damianeCcoia != 0) {
-                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pDamiane) + 0x38) = m_status.damianeCcoia;
-                            }
-                        }
-                        if (pOongka) {
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x30) = 1;
-                            *reinterpret_cast<uint8_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x34) = 1;
-                            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x35) = 0x0101;
-                            if (m_status.oongkaCcoia != 0) {
-                                *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pOongka) + 0x38) = m_status.oongkaCcoia;
-                            }
+                            updated = true;
                         }
                     }
-
-                    uint32_t newCount = *reinterpret_cast<uint32_t*>(countAddr);
-                    Logger::Log("[SwitchManager] Radial wheel updated! Companion count is now %u (Kliff, Damiane, Oongka active).\n", newCount);
-                    if (newCount >= 3) {
-                        m_wheelPopulated = true;
-                    }
-                    updated = true;
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {
                 Logger::Log("[SwitchManager] Exception guarded in CompanionContainer activation.\n");
@@ -567,9 +607,12 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
     uintptr_t userActor = GetUserActor();
     uintptr_t subMgr = 0;
     if (userActor != 0) {
-        subMgr = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR);
+        __try {
+            subMgr = *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_SUB_MGR);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { subMgr = 0; }
     }
 
+    // Resolve target actor pointer from companion container entry
     uintptr_t targetCcoia = 0;
     if (compContainer != 0 && m_fnFindCompanionById != 0) {
         __try {
@@ -577,70 +620,56 @@ bool SwitchManager::SwitchToCharacter(CharacterType targetChar, std::string& out
             void* pComp = fnFind(reinterpret_cast<void*>(compContainer), cid, false);
             if (pComp != nullptr) {
                 targetCcoia = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(pComp) + 0x38);
+                Logger::Log("[SwitchManager] CompanionEntry[%u] actor: 0x%p\n", cid, (void*)targetCcoia);
+            } else {
+                Logger::Log("[SwitchManager] CompanionEntry[%u] not found in container!\n", cid);
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
+    // Fallback: use cached discovered actor pointers
     if (targetCcoia == 0) {
         if (targetChar == CharacterType::Kliff)        targetCcoia = m_status.kliffCcoia;
         else if (targetChar == CharacterType::Damiane) targetCcoia = m_status.damianeCcoia;
         else if (targetChar == CharacterType::Oongka)  targetCcoia = m_status.oongkaCcoia;
+        if (targetCcoia != 0) {
+            Logger::Log("[SwitchManager] Using cached actor for %s: 0x%p\n",
+                        CharacterToString(targetChar), (void*)targetCcoia);
+        }
     }
 
-    // 1. Activate companion in CompanionContainer
+    if (targetCcoia == 0) {
+        outMessage = std::string(CharacterToString(targetChar)) +
+                     "'s actor is not yet spawned in the world. Try again after the game fully loads.";
+        Logger::Log("[SwitchManager] Switch BLOCKED: %s actor pointer is NULL.\n", CharacterToString(targetChar));
+        return false;
+    }
+
+    // 1. Call the engine's native SelectOrActivateCompanion function
     if (compContainer != 0 && m_fnSelectOrActivateCompanion != 0) {
         __try {
             auto fnActivate = reinterpret_cast<void* (__fastcall*)(void*, uint32_t)>(m_fnSelectOrActivateCompanion);
             void* pComp = fnActivate(reinterpret_cast<void*>(compContainer), cid);
             Logger::Log("[SwitchManager] SelectOrActivateCompanion(%u) -> 0x%p\n", cid, pComp);
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            Logger::Log("[SwitchManager] Exception in SelectOrActivateCompanion.\n");
+        }
     }
 
-    // 2. Rotate SubManager + 0x38 and UserActor + 0xD8 to the chosen hero!
-    if (targetCcoia != 0 && subMgr != 0 && userActor != 0) {
+    // 2. Rotate SubManager + 0x38 and UserActor + 0xD8 to point at the target hero
+    if (subMgr != 0 && userActor != 0) {
         __try {
+            uintptr_t prevControlled = *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA);
             *reinterpret_cast<uintptr_t*>(subMgr + BlackSpaceOffsets::SUB_MGR_TO_CONTROLLED_CCOIA) = targetCcoia;
             *reinterpret_cast<uintptr_t*>(userActor + BlackSpaceOffsets::USER_ACTOR_TO_CONTROLLED)   = targetCcoia;
             m_status.controlledCcoia = targetCcoia;
-            Logger::Log("[SwitchManager] Rotated controlled actor to 0x%p (%s)!\n",
-                        (void*)targetCcoia, CharacterToString(targetChar));
+            Logger::Log("[SwitchManager] Rotated SubMgr+0x38: 0x%p -> 0x%p (%s)\n",
+                        (void*)prevControlled, (void*)targetCcoia, CharacterToString(targetChar));
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             Logger::Log("[SwitchManager] Exception rotating controlled CCOIA.\n");
         }
-    } else if (targetCcoia == 0 && m_status.kliffCcoia != 0) {
-        // Fallback: Morph appearance XML descriptor on active player CCOIA
-        __try {
-            uintptr_t ptr1 = *reinterpret_cast<uintptr_t*>(m_status.kliffCcoia + 0x68);
-            if (ptr1 >= 0x10000 && ptr1 <= 0x7FFFFFFFFFFF) {
-                uintptr_t ccc = 0;
-                for (int i = 0; i < 64; ++i) {
-                    uintptr_t comp = *reinterpret_cast<uintptr_t*>(ptr1 + i * sizeof(uintptr_t));
-                    if (ObjectHasRttiName(comp, "ClientCharacterControlActorComponent")) {
-                        ccc = comp;
-                        break;
-                    }
-                }
-                if (ccc != 0) {
-                    uintptr_t ptr3 = *reinterpret_cast<uintptr_t*>(ccc + 0x40);
-                    if (ptr3 >= 0x10000 && ptr3 <= 0x7FFFFFFFFFFF) {
-                        uintptr_t strStruct = ptr3 + 0x38;
-                        uint64_t cap = *reinterpret_cast<uint64_t*>(strStruct + 0x18);
-                        char* buf = (cap >= 16) ? *reinterpret_cast<char**>(strStruct) : reinterpret_cast<char*>(strStruct);
-                        if (buf && !IsBadWritePtr(buf, 80)) {
-                            std::string_view newApp = (targetChar == CharacterType::Damiane) ? AppearancePaths::DAMIANE_APP :
-                                                      ((targetChar == CharacterType::Oongka) ? AppearancePaths::OONGKA_APP :
-                                                                                               AppearancePaths::KLIFF_APP);
-                            memcpy(buf, newApp.data(), newApp.size());
-                            buf[newApp.size()] = '\0';
-                            *reinterpret_cast<uint64_t*>(strStruct + 0x10) = newApp.size();
-                            Logger::Log("[SwitchManager] Morphed player appearance descriptor to: %s\n", buf);
-                        }
-                    }
-                }
-            }
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            Logger::Log("[SwitchManager] Exception in appearance morph fallback.\n");
-        }
+    } else {
+        Logger::Log("[SwitchManager] Cannot rotate: subMgr=0x%p userActor=0x%p\n", (void*)subMgr, (void*)userActor);
     }
 
     m_status.activeCharacter = targetChar;
